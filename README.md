@@ -4,7 +4,7 @@ AWS EKS 위에 **Kubeflow · MLflow · BentoML · KServe**를 구성하고, 합�
 검출 모델을 학습 → MLflow 등록 → BentoML 패키징 → KServe 서빙까지 Kubeflow 파이프라인 하나로 자동화합니다.
 
 설계와 버전 선택 근거는 [PLAN.md](PLAN.md)를, 아키텍처 구성도·실습 흐름도와 해설은
-[기술 블로그 글](docs/blog-eks-idcard-mlops.md)을 참고하세요.
+[기술 블로그 글](https://velog.io/@sejkim/4%EC%A3%BC%EC%B0%A8-EKS-%EC%9C%84%EC%97%90-Kubeflow-MLflow-BentoML-KServe%EB%A1%9C-%EC%8B%A0%EB%B6%84%EC%A6%9D-%EC%9D%B8%EC%8B%9D-MLOps-%ED%8C%8C%EC%9D%B4%ED%94%84%EB%9D%BC%EC%9D%B8-%EB%A7%8C%EB%93%A4%EA%B8%B0)을 참고하세요.
 
 ```
 ALB(HTTP, 허용 IP만) → Istio → oauth2-proxy/Dex
