@@ -1,0 +1,35 @@
+# ALB (HTTP:80) → istio-ingressgateway
+# 모든 요청은 Istio → oauth2-proxy/Dex 인증을 거친다.
+#   /            Kubeflow Central Dashboard
+#   /pipeline    Kubeflow Pipelines (UI/API)
+#   /mlflow/     MLflow UI/API
+#   /serving/<ns>/<isvc>/...  KServe 추론 (Bearer 토큰 필요)
+# ${ALLOWED_CIDRS} 는 platform/ingress/apply.sh가 envsubst로 채운다.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kubeflow-alb
+  namespace: istio-system
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/inbound-cidrs: ${ALLOWED_CIDRS}
+    alb.ingress.kubernetes.io/healthcheck-port: "15021"
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz/ready
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=300
+    alb.ingress.kubernetes.io/group.name: idcard-mlops
+    alb.ingress.kubernetes.io/tags: Owner=${OWNER},Project=${CLUSTER_NAME}
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: istio-ingressgateway
+                port:
+                  number: 80

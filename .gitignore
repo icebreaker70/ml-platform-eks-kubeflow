@@ -1,0 +1,54 @@
+# ───────── 비밀 정보 / 환경 ─────────
+.env
+.env.*
+!.env.example
+
+# ───────── 블로그 원고 · 스크린샷 (계정 ID·ALB 주소 등 실습 환경 정보 포함) ─────────
+docs/blog-eks-idcard-mlops.md
+docs/*.png
+# 합성 신분증 샘플은 `make test-infer IMG=...`용으로 남긴다
+!docs/id-card-sample*.jpg
+!docs/id-card-sample*.png
+
+# ───────── Python ─────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.ipynb_checkpoints/
+
+# ───────── Terraform ─────────
+# .terraform.lock.hcl은 provider 버전 고정용이므로 커밋한다
+infra/terraform/.terraform/
+infra/terraform/terraform.tfstate*
+infra/terraform/.terraform.tfstate.lock.info
+infra/terraform/terraform.tfvars
+infra/terraform/*.tfplan
+infra/terraform/crash.log
+infra/terraform/*.bak
+
+# ───────── 설치 중 내려받는 매니페스트 / 빌드 산출물 ─────────
+.build/
+*.bento
+bentoml_home/
+
+# ───────── 로컬 실행 산출물 ─────────
+artifacts/
+mlruns/
+mlflow.db
+data/
+# 컴파일 결과(ECR 계정 ID 포함) — make compile / make pipeline이 다시 만든다
+pipelines/idcard_pipeline.yaml
+*.log
+
+# ───────── OS / 에디터 ─────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+.claude/

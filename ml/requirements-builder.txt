@@ -1,0 +1,14 @@
+# idcard-builder 이미지 (MLflow 등록 / Bento 빌드 / 이미지 빌드 / KServe 배포 / 스모크 테스트) — CPU torch
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+easyocr==1.7.2
+bentoml==1.4.40
+mlflow==3.17.2
+kfp==2.18.0
+kubernetes==30.1.0
+boto3==1.44.2
+faker==40.54.0
+pillow==13.0.0
+numpy==2.5.4
+requests==2.33.0

@@ -1,0 +1,16 @@
+# KServe 추론 서비스(idcard-recognizer) 접근 허용 정책
+# 프로필 네임스페이스 기본 정책은 소유자(user@example.com) 요청만 허용하므로,
+# Istio 게이트웨이에서 인증(Dex 쿠키 또는 M2M 토큰)을 통과한 요청이 predictor에 도달하도록 허용한다.
+# (kubeflow/manifests tests/kserve_test.sh와 같은 방식)
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-idcard-recognizer
+  namespace: ${KF_PROFILE_NS}
+spec:
+  action: ALLOW
+  rules:
+    - {}
+  selector:
+    matchLabels:
+      serving.knative.dev/service: idcard-recognizer-predictor

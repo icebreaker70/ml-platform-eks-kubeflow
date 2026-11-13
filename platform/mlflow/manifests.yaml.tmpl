@@ -1,0 +1,189 @@
+# MLflow 3.17.2 + PostgreSQL 17 (클러스터 내부)
+#  - backend store: PostgreSQL (StatefulSet, gp3 PVC 20Gi)
+#  - artifact store: S3 s3://${BUCKET}/mlflow  (--serve-artifacts: 클라이언트는 S3 권한 불필요)
+#  - 외부 접속: Istio kubeflow-gateway /mlflow/ (Dex 로그인 필요)
+#  - 클러스터 내부 접속: http://mlflow.mlflow.svc.cluster.local:5000/mlflow
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlflow
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlflow
+  namespace: mlflow   # EKS Pod Identity association 대상 (infra/terraform/iam.tf)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: mlflow
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: tcp-postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: mlflow
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: ${POSTGRES_IMAGE}
+          env:
+            - name: POSTGRES_DB
+              value: mlflow
+            - name: POSTGRES_USER
+              value: mlflow
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mlflow", "-d", "mlflow"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: mlflow
+spec:
+  selector:
+    app: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      serviceAccountName: mlflow
+      initContainers:
+        - name: wait-db
+          image: ${POSTGRES_IMAGE}
+          command: ["sh", "-c", "until pg_isready -h postgres -U mlflow; do sleep 3; done"]
+      containers:
+        - name: mlflow
+          image: ${IMAGE_MLFLOW}
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db
+                  key: password
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+            # boto3는 AWS_REGION을 읽지 않는다. 없으면 presigned URL이 us-east-1로 서명되어
+            # 클라이언트 다운로드가 S3에서 400(AuthorizationQueryParametersError)으로 실패한다.
+            - name: AWS_DEFAULT_REGION
+              value: ${AWS_REGION}
+            # MLflow 3.x는 GenAI 평가/트레이스용 백그라운드 작업 프로세스(huey)를 8개쯤 띄운다(각 ~230Mi).
+            # 이 실습은 쓰지 않으므로 끈다. 켜 두면 유휴 상태에서 이미 ~1.9Gi라 아티팩트 업로드 중 OOMKilled.
+            - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
+              value: "false"
+          args:
+            - server
+            - --host=0.0.0.0
+            - --port=5000
+            - --workers=2
+            - --backend-store-uri=postgresql+psycopg2://mlflow:$(DB_PASSWORD)@postgres.mlflow.svc.cluster.local:5432/mlflow
+            - --artifacts-destination=s3://${BUCKET}/mlflow
+            - --serve-artifacts
+            - --static-prefix=/mlflow
+            # Istio 게이트웨이(ALB DNS)와 클러스터 내부 서비스 이름으로 들어오므로 Host 검사를 완화한다.
+            # 외부 접근은 ALB inbound-cidrs + Dex 로그인으로 제한된다.
+            - --allowed-hosts=*
+            # UI는 ALB 주소에서 열리므로 그 Origin의 POST(검색, 태그 수정 등)를 허용한다.
+            - --cors-allowed-origins=http://*.${AWS_REGION}.elb.amazonaws.com
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            httpGet:
+              path: /mlflow/health
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 768Mi
+            limits:
+              memory: 2Gi
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: mlflow
+  namespace: mlflow
+spec:
+  gateways:
+    - kubeflow/kubeflow-gateway
+  hosts:
+    - "*"
+  http:
+    - match:
+        - uri:
+            prefix: /mlflow/
+        - uri:
+            exact: /mlflow
+      route:
+        - destination:
+            host: mlflow.mlflow.svc.cluster.local
+            port:
+              number: 5000
+      timeout: 300s

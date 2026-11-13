@@ -1,0 +1,12 @@
+# cp terraform.tfvars.example terraform.tfvars
+region        = "ap-northeast-2"
+cluster_name  = "idcard-mlops"
+allowed_cidrs = ["180.224.237.157/32"]
+owner         = "sejkim" # 모든 AWS 자원의 Owner 태그 (필수)
+
+# 일반 노드 2대 + GPU 노드 1대. 그래도 파드가 Pending이면 cpu_instance_type = "m6i.2xlarge"로 상향한다.
+cpu_instance_type = "m6i.xlarge"
+cpu_node_count    = 2
+
+gpu_instance_type = "g6.xlarge"
+gpu_node_count    = 1

@@ -1,0 +1,33 @@
+# BentoML 1.4.40
+# 이 파일은 파이프라인의 bento-build 단계에서 임시 빌드 컨텍스트로 복사되어 사용된다.
+# (컨텍스트: service.py, bentofile.yaml, model_tag.txt, idcard/ 패키지)
+service: "service:IdCardRecognizer"
+name: idcard-recognizer
+labels:
+  project: idcard-mlops
+# 컨테이너 빌드 시 uv는 extra_index_url(PyTorch 인덱스)을 PyPI보다 먼저 보고, 패키지를 처음 찾은
+# 인덱스만 쓴다. PyTorch 인덱스에는 certifi·numpy 등이 옛 버전으로 올라와 있어 bentoml 의존성이 풀리지
+# 않으므로, 두 인덱스에서 가장 맞는 버전을 고르게 한다. (두 인덱스 모두 공식 인덱스라 이 실습에서는 허용)
+envs:
+  - name: UV_INDEX_STRATEGY
+    value: unsafe-best-match
+include:
+  - "service.py"
+  - "model_tag.txt"
+  - "idcard/*.py"
+python:
+  # 서빙은 CPU에서 하므로 CPU 전용 torch로 이미지 크기를 줄인다.
+  packages:
+    - torch==2.14.1+cpu
+    - torchvision==0.29.1+cpu
+    - easyocr==1.7.2
+    - pillow
+    - numpy
+  extra_index_url:
+    - https://download.pytorch.org/whl/cpu
+  lock_packages: false
+docker:
+  python_version: "3.12"
+  system_packages:
+    - libgl1
+    - libglib2.0-0
