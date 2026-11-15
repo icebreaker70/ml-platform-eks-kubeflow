@@ -4,7 +4,8 @@ TF := terraform -chdir=infra/terraform
 ENV := source scripts/env.sh
 
 .PHONY: help check-tools venv test local-demo infra kubeconfig images kubeflow ingress mlflow extras \
-        platform compile pipeline info test-infer destroy
+        platform compile pipeline info test-infer destroy \
+        movierec-local tensorboard movierec tb tb-delete tb-status nodes
 
 help: ## 명령 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -30,6 +31,10 @@ infra: ## Terraform: VPC, EKS(1.36), 노드그룹, S3, ECR, IAM, ALB 컨트롤�
 	$(TF) init -upgrade
 	$(TF) apply
 	$(MAKE) kubeconfig
+	bash platform/karpenter/apply.sh
+
+nodes: ## 노드 · Karpenter NodePool · 구매 방식(Spot/온디맨드) 확인
+	@bash platform/karpenter/apply.sh status
 
 kubeconfig: ## kubeconfig 갱신
 	$$($(TF) output -raw configure_kubectl)
@@ -59,6 +64,27 @@ pipeline: ## 파이프라인 실행 제출 (EPOCHS=10 NUM_TRAIN=3000 DATASET_VER
 	$(ENV) && .venv/bin/python pipelines/run.py --host "http://$$(alb_host)/pipeline" \
 	  --epochs $${EPOCHS:-10} --num-train $${NUM_TRAIN:-3000} --num-val $${NUM_VAL:-500} \
 	  --dataset-version $${DATASET_VERSION:-v1}
+
+# ------------------------------------------- 영화 추천 + TensorBoard (5주차) ----
+movierec-local: ## 로컬에서 MovieLens 학습 → runs/movierec (확인: .venv/bin/tensorboard --logdir runs/movierec)
+	PYTHONPATH=ml/src .venv/bin/python -m movierec.train --logdir runs/movierec \
+	  --emb-dims $${EMB_DIMS:-16,32,64} --epochs $${EPOCHS:-20}
+
+tensorboard: ## Tensorboard 컨트롤러 + 웹 앱 + 로그용 PVC 설치 (make kubeflow 이후)
+	bash platform/tensorboard/install.sh
+
+movierec: ## 영화 추천 파이프라인 제출 (EPOCHS=20 EMB_DIMS=16,32,64)
+	$(ENV) && .venv/bin/python pipelines/run_movierec.py --host "http://$$(alb_host)/pipeline" \
+	  --epochs $${EPOCHS:-20} --emb-dims $${EMB_DIMS:-16,32,64} $${FORCE:+--force}
+
+tb: ## Tensorboard 인스턴스 생성 (pvc://movierec-tb/movierec)
+	bash platform/tensorboard/instance.sh create
+
+tb-delete: ## Tensorboard 인스턴스 삭제 (로그는 PVC에 남음)
+	bash platform/tensorboard/instance.sh delete
+
+tb-status: ## Tensorboard 인스턴스 · PVC 상태
+	bash platform/tensorboard/instance.sh status
 
 info: ## 접속 주소 출력
 	@bash scripts/info.sh

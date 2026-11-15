@@ -9,3 +9,5 @@ boto3==1.44.2
 faker==40.54.0
 pillow==13.0.0
 numpy==2.5.4
+# movierec(영화 추천) 학습의 TensorBoard 로깅용
+tensorboard==2.21.0

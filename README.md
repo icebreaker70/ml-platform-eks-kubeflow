@@ -21,12 +21,15 @@ ALB(HTTP, 허용 IP만) → Istio → oauth2-proxy/Dex
 
 | 경로 | 내용 |
 |---|---|
-| `infra/terraform/` | VPC, EKS 1.36, 노드그룹(m6i.xlarge×2, g6.xlarge×1), S3, ECR, Pod Identity, ALB 컨트롤러, NVIDIA 플러그인 |
+| `infra/terraform/` | VPC, EKS 1.36, 관리형 노드그룹(m6i.xlarge×2), Karpenter, S3, ECR, Pod Identity, ALB 컨트롤러, NVIDIA 플러그인 |
+| `platform/karpenter/` | Karpenter NodePool — GPU 노드(Spot 우선, 학습 때만), 파이프라인용 임시 CPU 노드 |
 | `platform/kubeflow/` | Kubeflow 26.10.0 필수 구성 설치 스크립트 |
 | `platform/ingress/` | ALB Ingress (HTTP:80, 허용 IP 제한) |
 | `platform/mlflow/` | MLflow 3.17.2 + PostgreSQL 17 |
 | `platform/buildkit/`, `platform/kserve/` | BuildKit 데몬, KServe 접근 정책 |
 | `ml/src/idcard/` | 합성 데이터 생성, 학습, 평가, 추론, 후처리(마스킹), 파이프라인 단계 구현 |
+| `platform/tensorboard/` | (5주차) Tensorboard 컨트롤러·웹 앱 설치, 로그용 PVC, 인스턴스 생성 스크립트 |
+| `ml/src/movierec/` | (5주차) MovieLens 영화 추천(BPR 행렬 분해) 학습 + TensorBoard 로깅 |
 | `ml/serving/` | BentoML 서비스(`service.py`, `bentofile.yaml`) |
 | `pipelines/` | KFP v2 컴포넌트·파이프라인·실행 스크립트 |
 | `images/` | 컴포넌트 이미지 Dockerfile (idcard-ml, idcard-builder, mlflow-server) |
@@ -46,9 +49,23 @@ make local-demo             # (선택) 로컬 CPU에서 소량 학습 → mlflow
 
 ```bash
 make infra
-kubectl get nodes -L node-role                       # cpu 2대, gpu 1대 Ready
-kubectl get nodes -o json | jq '.items[].status.allocatable["nvidia.com/gpu"]'   # GPU 노드 "1"
+make nodes        # cpu 2대 Ready, NodePool gpu · burst 준비됨 (GPU 노드는 아직 0대)
 ```
+
+### GPU 노드는 학습 때만, Spot으로 (Karpenter)
+
+GPU 노드를 항상 켜 두지 않습니다. 학습 파드가 GPU를 요청하면 Karpenter가 그때 노드를 띄우고, 끝나고 5분 뒤 지웁니다.
+
+| NodePool | 언제 뜨나 | 구매 방식 | 올라올 수 있는 파드 |
+|---|---|---|---|
+| `gpu` | GPU를 요청하는 파드가 Pending일 때 | Spot 우선, 없으면 온디맨드 | `nvidia.com/gpu` taint를 허용한 파드(학습) |
+| `burst` | 파이프라인 단계가 일반 노드에 못 들어갈 때 | Spot 우선, 없으면 온디맨드 | `workload=batch` taint를 허용한 파드(파이프라인 단계) |
+
+- 플랫폼 파드(Kubeflow·MLflow·추론)는 관리형 일반 노드(온디맨드) 2대에만 올라갑니다.
+- 처음 학습할 때는 노드가 뜨고 이미지를 받는 시간(수 분)이 더 걸립니다. 진행 상황: `make nodes`, `kubectl get nodeclaims`
+- 설정은 `terraform.tfvars`에서 바꿉니다. Spot만 쓰려면 `gpu_capacity_types = ["spot"]`, 예전처럼 항상 켜진 온디맨드 GPU 노드를 쓰려면 `enable_karpenter = false`. 바꾼 뒤 `make infra`.
+- Spot 노드는 2분 전 통보만 하고 회수될 수 있습니다. 학습 단계는 한 번 자동 재시도합니다.
+- 이 구성은 `terraform plan`과 매니페스트 스키마 검증까지만 했고, **EKS에서 아직 실행해 보지 않았습니다.**
 
 모든 AWS 자원에는 `Owner=sejkim` 태그가 붙습니다 (`terraform.tfvars`의 `owner`). 확인:
 
@@ -158,7 +175,27 @@ make destroy
 ```
 
 ALB와 PVC(EBS)를 쿠버네티스에서 먼저 지운 뒤 `terraform destroy`를 실행합니다.
-**GPU 노드 때문에 시간당 약 1.6달러가 나오므로 실습이 끝나면 꼭 삭제하세요.**
+Karpenter가 띄운 노드도 함께 지웁니다 (NodePool 삭제 → 남은 인스턴스가 있으면 직접 종료).
+**학습이 없을 때도 시간당 약 0.7달러가 나오므로 실습이 끝나면 꼭 삭제하세요.** (GPU 노드를 항상 켜 두던 구성은 약 1.6달러)
+
+## 추가 실습 (5주차): 영화 추천 + Kubeflow Tensorboard
+
+MovieLens(ml-latest-small)로 영화 추천 모델을 학습하고, 로그를 Kubeflow Tensorboard 인스턴스로 확인합니다.
+위 1~3단계(인프라·이미지·플랫폼)가 끝난 상태에서 진행합니다. `tensorboard` 패키지와 `movierec` 코드가
+학습 이미지에 추가됐으므로, 이전에 만든 이미지가 있다면 `make images`를 다시 실행합니다.
+
+```bash
+make movierec-local   # (선택) 로컬 학습 → .venv/bin/tensorboard --logdir runs/movierec
+make tensorboard      # Tensorboard 컨트롤러 + 웹 앱 + 로그용 PVC(movierec-tb) 설치
+make movierec         # 파이프라인 제출 (EPOCHS=20 EMB_DIMS=16,32,64)
+make tb               # 학습이 끝난 뒤 Tensorboard 인스턴스 생성 → 접속 주소 출력
+make tb-delete        # 인스턴스 삭제 (로그는 PVC에 남음)
+```
+
+- 접속: `http://<ALB>/tensorboard/kubeflow-user-example-com/movierec/` 또는 대시보드 메뉴 **Tensorboards** (`http://<ALB>/_/tensorboards/`)
+- 로그 PVC는 EBS(ReadWriteOnce)라 한 노드에만 붙습니다. **다시 학습할 때는 `make tb-delete` → `make movierec` → `make tb` 순서**로 진행합니다.
+  인스턴스가 떠 있으면 `make movierec`이 제출을 막습니다(`FORCE=1`로 무시).
+- 로컬 학습·TensorBoard 로그·파이프라인 컴파일·매니페스트 빌드는 확인했지만, **EKS에서의 Tensorboard 설치와 접속은 아직 실행해 보지 않았습니다.**
 
 ## 문제 해결
 
@@ -167,7 +204,10 @@ ALB와 PVC(EBS)를 쿠버네티스에서 먼저 지운 뒤 `terraform destroy`�
 | ALB 접속 시 타임아웃 | 내 공인 IP가 `allowed_cidrs`와 같은지 (`curl ifconfig.me`) |
 | 로그인 후 계속 로그인 화면 | HTTP 접속이므로 `FORCE_HTTPS=false` 패치 확인: `kubectl -n oauth2-proxy get cm -o yaml \| grep FORCE` |
 | `make pipeline`에서 401/403 | `kubectl -n kubeflow-user-example-com create token default-editor` 동작 확인, `kubectl -n istio-system get requestauthentication m2m-token-issuer -o yaml`의 issuer가 `terraform output oidc_issuer_url`과 같은지 |
-| train 파드 Pending | `kubectl -n kubeflow-user-example-com describe pod <train 파드>`의 이벤트 확인. `Insufficient cpu`면 GPU 노드에 올라간 다른 파드(추론 파드 등) 때문 — 학습 파드 요청은 CPU 1코어 |
+| train 파드 Pending (Karpenter) | 노드가 뜨는 중이면 정상(수 분). 오래 걸리면 `kubectl get nodeclaims`, `kubectl -n kube-system logs deploy/karpenter \| tail -30` — Spot 용량 부족·한도 초과·`gpu_node_limit` 도달 여부 확인 |
+| train 파드 Pending (관리형 GPU 노드) | `kubectl -n kubeflow-user-example-com describe pod <train 파드>`의 이벤트 확인. `Insufficient cpu`면 GPU 노드에 올라간 다른 파드(추론 파드 등) 때문 — 학습 파드 요청은 CPU 1코어 |
+| 플랫폼 파드 Pending | 일반 노드 2대가 꽉 찬 것. `cpu_node_count = 3` 또는 `cpu_instance_type = "m6i.2xlarge"` 후 `make infra` (플랫폼 파드는 Karpenter 노드에 올라가지 않음) |
+| `make infra`에서 `Error locating chart … no cached repo found` | 로컬 Helm 캐시 문제 — `helm repo update` 후 다시 실행 |
 | 노드 수가 `terraform.tfvars`와 다름 | `kubectl get nodes -L node-role` — 수동으로 늘린 노드그룹은 위 "이미 만든 클러스터의 노드 수" 절차로 되돌림 (GPU 2대면 비용 약 1.5배) |
 | smoke-test/추론이 `413 Payload Too Large`(HTML) | Host 헤더가 `example.com`(isvc `status.url`의 호스트)인지 — 아니면 대시보드로 라우팅됨 |
 | 추론 `401 Jwt issuer is not configured` | `kubectl -n istio-system get requestauthentication cluster-local-gateway-jwt -o yaml`에 EKS issuer 규칙이 있는지 (`make kubeflow` 재실행) |

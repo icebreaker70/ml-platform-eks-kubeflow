@@ -1,0 +1,17 @@
+# TensorBoard 로그 저장용 PVC.
+#  - 학습 파드(KFP)가 /tensorboard 에 붙여 로그를 쓰고, Tensorboard 인스턴스가 같은 PVC를 읽는다.
+#  - gp3(EBS)는 ReadWriteOnce: 같은 노드의 파드끼리만 동시에 붙일 수 있다.
+#  - gp3 StorageClass의 tagSpecification 덕분에 만들어지는 EBS에도 Owner 태그가 붙는다.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${TB_PVC}
+  namespace: ${KF_PROFILE_NS}
+  labels:
+    app.kubernetes.io/part-of: movierec
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: ${TB_PVC_SIZE}

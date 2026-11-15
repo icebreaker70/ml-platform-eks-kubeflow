@@ -5,6 +5,7 @@
 
 # ───────── 블로그 원고 · 스크린샷 (계정 ID·ALB 주소 등 실습 환경 정보 포함) ─────────
 docs/blog-eks-idcard-mlops.md
+docs/blog-week5-movierec-tensorboard.md
 docs/*.png
 # 합성 신분증 샘플은 `make test-infer IMG=...`용으로 남긴다
 !docs/id-card-sample*.jpg
@@ -43,6 +44,9 @@ mlflow.db
 data/
 # 컴파일 결과(ECR 계정 ID 포함) — make compile / make pipeline이 다시 만든다
 pipelines/idcard_pipeline.yaml
+pipelines/movierec_pipeline.yaml
+# 로컬 TensorBoard 로그 (make movierec-local)
+runs/
 *.log
 
 # ───────── OS / 에디터 ─────────

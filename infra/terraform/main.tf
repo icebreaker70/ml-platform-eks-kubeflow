@@ -69,6 +69,8 @@ module "vpc" {
   }
   private_subnet_tags = {
     "kubernetes.io/role/internal-elb" = 1
+    # Karpenter EC2NodeClass가 이 태그로 노드를 띄울 서브넷을 찾는다.
+    "karpenter.sh/discovery" = var.cluster_name
   }
 
   tags = local.tags
@@ -99,6 +101,12 @@ module "eks" {
   # 모듈 권장 규칙은 컨트롤 플레인→노드 웹훅 포트를 443/4443/6443/8443/9443/10250만 연다.
   # Istio sidecar injector(istiod)는 15017을 쓰므로 추가하지 않으면 istio-injection이 켜진
   # 네임스페이스(knative-serving, kubeflow 등)에서 파드 생성이 웹훅 타임아웃으로 막힌다.
+  # Karpenter가 만드는 노드도 관리형 노드와 같은 보안 그룹을 쓴다 (EC2NodeClass가 이 태그로 찾는다).
+  # 아래 15017 규칙도 그대로 적용된다.
+  node_security_group_tags = {
+    "karpenter.sh/discovery" = var.cluster_name
+  }
+
   node_security_group_additional_rules = {
     ingress_cluster_istio_webhook = {
       description                   = "Cluster API to istiod sidecar injector / validation webhook"
@@ -127,8 +135,8 @@ module "eks" {
     }
   }
 
-  eks_managed_node_groups = {
-    # 일반 노드: Istio, Kubeflow, MLflow, KServe 추론 파드
+  eks_managed_node_groups = merge({
+    # 일반 노드: Istio, Kubeflow, MLflow, KServe 추론 파드, Karpenter 컨트롤러
     cpu = {
       ami_type       = "AL2023_x86_64_STANDARD"
       instance_types = [var.cpu_instance_type]
@@ -153,29 +161,31 @@ module "eks" {
       }
     }
 
-    # GPU 노드: 학습 파드 + 일부 플랫폼 파드 (taint 없음, 계획서 4절 참고)
-    gpu = {
-      ami_type       = "AL2023_x86_64_NVIDIA"
-      instance_types = [var.gpu_instance_type]
-      min_size       = var.gpu_node_count
-      max_size       = max(var.gpu_node_count, 1)
-      desired_size   = var.gpu_node_count
-      subnet_ids     = [for i, az in local.azs : module.vpc.private_subnets[i] if contains(local.gpu_azs, az)]
+    }, { for name, group in {
+      # 관리형 GPU 노드그룹 — enable_karpenter = false일 때만 만든다 (온디맨드, 항상 켜져 있음, taint 없음).
+      # Karpenter를 쓰면 GPU 노드는 platform/karpenter의 NodePool이 학습 때만 Spot으로 띄운다.
+      gpu = {
+        ami_type       = "AL2023_x86_64_NVIDIA"
+        instance_types = [var.gpu_instance_type]
+        min_size       = var.gpu_node_count
+        max_size       = max(var.gpu_node_count, 1)
+        desired_size   = var.gpu_node_count
+        subnet_ids     = [for i, az in local.azs : module.vpc.private_subnets[i] if contains(local.gpu_azs, az)]
 
-      labels = {
-        "node-role" = "gpu"
-      }
+        labels = {
+          "node-role" = "gpu"
+        }
 
-      block_device_mappings = {
-        xvda = {
-          device_name = "/dev/xvda"
-          ebs = {
-            volume_size           = 150
-            volume_type           = "gp3"
-            delete_on_termination = true
+        block_device_mappings = {
+          xvda = {
+            device_name = "/dev/xvda"
+            ebs = {
+              volume_size           = 150
+              volume_type           = "gp3"
+              delete_on_termination = true
+            }
           }
         }
       }
-    }
-  }
+  } : name => group if !var.enable_karpenter })
 }

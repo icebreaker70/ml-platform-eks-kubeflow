@@ -1,0 +1,11 @@
+# Kubeflow Tensorboard 인스턴스.
+#  logspath 형식:  pvc://<PVC 이름>/<PVC 안의 하위 경로>
+#  컨트롤러가 이 리소스를 보고 같은 이름의 Deployment · Service · VirtualService를 만든다.
+#  접속 주소:  http://<ALB>/tensorboard/<네임스페이스>/<이름>/
+apiVersion: tensorboard.kubeflow.org/v1alpha1
+kind: Tensorboard
+metadata:
+  name: ${TB_NAME}
+  namespace: ${KF_PROFILE_NS}
+spec:
+  logspath: pvc://${TB_PVC}/${TB_SUBDIR}

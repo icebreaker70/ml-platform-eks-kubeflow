@@ -11,6 +11,7 @@
 | v3 | HTTP 접속 + 허용 IP 확정, Kubeflow 필수 구성만 설치, 버전 재검증(torch/torchvision 짝, MLflow 패치 버전 등), 구현 중 바뀐 설계 반영 |
 | v3.1 | 허용 IP를 180.224.237.157/32로 변경, 모든 AWS 자원에 `Owner=sejkim` 태그 필수 적용 |
 | v3.2 | 일반 노드를 `m6i.xlarge` × 2로 변경 (GPU 노드 `g6.xlarge` × 1 유지) |
+| v3.4 | GPU 비용 절감: 관리형 GPU 노드그룹을 Karpenter NodePool로 대체 (Spot 우선, 학습 때만 기동, taint 적용). 파이프라인용 임시 CPU NodePool(burst) 추가 |
 | v3.3 | EKS 실측 반영: 학습 파드 CPU 요청 2 → 1 (taint 없는 GPU 노드에서 `Insufficient cpu`로 20분 Pending), 기본값 실행(10 epoch·3,000장) 통과 기록 |
 
 ### 확정된 요구사항
@@ -18,7 +19,7 @@
 |---|---|
 | 리전 | `ap-northeast-2` (서울) |
 | 일반 노드 | `m6i.xlarge` × 2 — 리소스가 부족하면 `m6i.2xlarge`로 상향 허용 (Terraform 변수) |
-| GPU 노드 | `g6.xlarge` × 1 (NVIDIA L4 24 GB) |
+| GPU 노드 | Karpenter가 학습 때만 기동 — Spot 우선, `g6`/`g5`/`g4dn` 계열의 xlarge·2xlarge 중 선택 (v3.3까지는 `g6.xlarge` × 1 상시) |
 | 인식 범위 | **검출 모델만 학습**, 글자 인식은 EasyOCR 사전학습 모델 사용 |
 | IaC | Terraform |
 | MLflow DB | 클러스터 내부 PostgreSQL (StatefulSet + gp3 PVC) |
@@ -140,7 +141,15 @@ AWS CLI v2, kubectl 1.36.x, kustomize v5.x, Helm 3.x, Docker + buildx, envsubst(
  ECR: idcard-ml, idcard-builder, mlflow-server, idcard-recognizer
 ```
 
-### 노드 2대 운영
+### 노드 운영 (v3.4, Karpenter)
+- 관리형 노드그룹은 일반 노드(`node-role=cpu`, 온디맨드) 2대만 둔다. 플랫폼 파드와 Karpenter 컨트롤러가 여기서 돈다.
+- NodePool `gpu`: `nvidia.com/gpu` taint + `node-role=gpu` 라벨. 학습 파드가 Pending이 되면 뜨고, 비면 5분 뒤 사라진다. GPU 상한 1개.
+- NodePool `burst`: `workload=batch` taint. 파이프라인 단계가 일반 노드에 들어가지 못할 때만 뜬다(vCPU 상한 8). 관리형 GPU 노드가 맡던 여유 자원을 대신한다.
+- 플랫폼 파드는 taint 때문에 Karpenter 노드로 가지 않는다. MySQL·PostgreSQL이 Spot 회수로 중단되는 일을 피하기 위해서다.
+- Spot 회수에 대비해 학습 단계는 1회 재시도한다. Karpenter 노드에도 EC2NodeClass `tags`로 `Owner` 태그가 붙는다.
+- `enable_karpenter = false`로 두면 아래의 이전 구성(관리형 GPU 노드 1대 상시)으로 돌아간다.
+
+### 이전 구성: 관리형 GPU 노드 상시 운영 (`enable_karpenter = false`)
 - GPU 노드에 `NoSchedule` taint를 걸지 않아 플랫폼 파드가 두 노드에 나뉘어 올라간다. 학습 파드만 GPU를 요청하고 `node-role=gpu`에 고정된다.
 - 그래서 GPU 노드는 0대로 줄일 수 없다. 비용은 실습 후 `make destroy`로 관리한다.
 - GPU 노드(할당 가능 CPU 3.92)의 CPU를 플랫폼·추론 파드와 나눠 쓰므로 학습 파드는 CPU 요청 1코어(limit 없음)로 둔다. 2코어 요청 시 EKS에서 GPU가 비어 있는데도 Pending이 되었다.
@@ -228,14 +237,20 @@ AWS 리소스를 만들지 않고 확인할 수 있는 부분은 로컬에서 �
 | NAT Gateway | 약 0.06 + 데이터 |
 | ALB | 약 0.03 + LCU |
 | EBS gp3 (노드 250 GB + PVC 약 90 GB) | 월 약 30 |
-| **합계** | **시간당 약 1.6 → 하루 약 40** |
+| **합계 (GPU 상시, v3.3까지)** | **시간당 약 1.6 → 하루 약 40** |
+| **합계 (Karpenter, 학습 없을 때)** | **시간당 약 0.7 → 하루 약 16** + 학습 시간만큼의 GPU Spot 요금 |
+
+GPU Spot 시세 (서울, 2026-11-15 조회, 시간당): `g4dn.xlarge` 약 0.33 · `g6.xlarge` 약 0.47 · `g5.xlarge` 약 0.60.
+온디맨드 `g6.xlarge` 약 1.0과 비교하면 절반 이하이고, 학습이 없으면 0이다. 10분짜리 파이프라인 한 번에 GPU 노드는 10여 분(노드 기동 + 학습 + 비운 뒤 5분 대기) 떠 있으므로 실행당 0.1달러 안팎이다.
 
 ## 9. 위험 요소와 대응
 
 | 위험 | 대응 |
 |---|---|
 | 노드 리소스 부족 | 필수 구성만 설치. 그래도 부족하면 일반 노드 상향 (변수) |
-| GPU 노드 CPU 부족으로 학습 파드 Pending | 학습 파드 CPU 요청 1코어. 그래도 Pending이면 `kubectl describe pod`의 `Insufficient cpu` 확인 후 GPU 노드의 추론 파드 위치 확인 |
+| Spot 용량 부족·회수 | 온디맨드 대체 허용(`gpu_capacity_types`), 3개 GPU 계열 허용, 학습 단계 1회 재시도 |
+| Karpenter 노드가 정리되지 않고 남음 | `scripts/destroy.sh`가 NodePool을 먼저 지우고, 남은 인스턴스를 태그로 찾아 종료 |
+| (관리형 GPU 노드 구성) GPU 노드 CPU 부족으로 학습 파드 Pending | 학습 파드 CPU 요청 1코어. 그래도 Pending이면 `kubectl describe pod`의 `Insufficient cpu` 확인 후 GPU 노드의 추론 파드 위치 확인 |
 | 노드그룹을 수동으로 늘린 채 방치 (GPU 2대면 시간당 약 +0.8달러) | `kubectl get nodes -L node-role`로 확인, README의 CLI 절차로 Terraform 값에 맞춤 |
 | g6.xlarge를 제공하지 않는 AZ | Terraform이 두 인스턴스 타입을 모두 제공하는 AZ를 골라 서브넷 생성 |
 | Kubeflow 26.10.0 출시 직후 문제 | `KF_VERSION=26.03.1`로 재설치 |

@@ -43,6 +43,26 @@ output "availability_zones" {
   value = local.azs
 }
 
+# --- Karpenter (platform/karpenter/apply.sh가 읽는다) ---
+output "karpenter_enabled" {
+  value = var.enable_karpenter
+}
+
+output "karpenter_node_role_name" {
+  value = var.enable_karpenter ? module.karpenter[0].node_iam_role_name : ""
+}
+
+output "karpenter_nodepool_settings" {
+  description = "NodePool 템플릿에 넣을 값 (JSON 배열은 YAML에 그대로 쓸 수 있다)"
+  value = {
+    gpu_capacity_types   = jsonencode(var.gpu_capacity_types)
+    gpu_families         = jsonencode(var.gpu_instance_families)
+    gpu_limit            = var.gpu_node_limit
+    burst_capacity_types = jsonencode(var.burst_capacity_types)
+    burst_cpu_limit      = var.burst_cpu_limit
+  }
+}
+
 output "configure_kubectl" {
   value = "aws eks update-kubeconfig --region ${var.region} --name ${module.eks.cluster_name}"
 }

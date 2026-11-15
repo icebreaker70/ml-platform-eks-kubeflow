@@ -20,6 +20,14 @@ if kubectl cluster-info >/dev/null 2>&1; then
   kubectl -n kubeflow delete deploy,statefulset --all --timeout=180s 2>/dev/null
   kubectl -n kubeflow delete pvc --all --timeout=180s 2>/dev/null
 
+  # Karpenter가 띄운 노드는 Terraform 상태에 없다. 컨트롤러가 살아 있을 때 NodePool을 지워 인스턴스를 종료시킨다.
+  if kubectl get crd nodepools.karpenter.sh >/dev/null 2>&1; then
+    log "Karpenter 노드 삭제 (NodePool 삭제 → 인스턴스 종료 대기)"
+    kubectl delete nodepools.karpenter.sh --all --timeout=600s 2>/dev/null
+    kubectl delete nodeclaims.karpenter.sh --all --timeout=300s 2>/dev/null
+    kubectl delete ec2nodeclasses.karpenter.k8s.aws --all --timeout=120s 2>/dev/null
+  fi
+
   log "ALB 삭제 대기"
   for i in $(seq 1 30); do
     n=$(aws elbv2 describe-load-balancers --region "${AWS_REGION}" \
@@ -30,6 +38,19 @@ if kubectl cluster-info >/dev/null 2>&1; then
   sleep 30
 else
   log "클러스터에 접속할 수 없어 쿠버네티스 정리 단계를 건너뜁니다"
+fi
+
+# 위 단계가 실패했거나 클러스터에 접속할 수 없었을 때를 대비해, Karpenter가 띄운 인스턴스가 남았는지 직접 확인한다.
+# 남아 있으면 VPC 삭제가 막히고 과금이 계속된다. EC2NodeClass에서 붙인 태그(Project, ManagedBy=karpenter)로 찾는다.
+LEFT="$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:Project,Values=${CLUSTER_NAME}" "Name=tag:ManagedBy,Values=karpenter" \
+            "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+  --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)"
+if [[ -n "${LEFT}" ]]; then
+  log "남은 Karpenter 인스턴스 종료: ${LEFT}"
+  # shellcheck disable=SC2086
+  aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${LEFT} >/dev/null \
+    && aws ec2 wait instance-terminated --region "${AWS_REGION}" --instance-ids ${LEFT}
 fi
 
 log "terraform destroy"

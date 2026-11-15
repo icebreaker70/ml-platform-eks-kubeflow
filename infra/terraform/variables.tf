@@ -54,15 +54,70 @@ variable "cpu_node_count" {
 }
 
 variable "gpu_instance_type" {
-  description = "GPU 노드 인스턴스 타입 (NVIDIA L4)"
+  description = "GPU 인스턴스 타입 (NVIDIA L4). 서브넷 AZ 선택 기준이며, enable_karpenter = false일 때는 관리형 GPU 노드그룹의 타입"
   type        = string
   default     = "g6.xlarge"
 }
 
 variable "gpu_node_count" {
-  description = "GPU 노드 수. 플랫폼 파드도 함께 배치되므로 0으로 줄이지 않는다"
+  description = "관리형 GPU 노드 수 (enable_karpenter = false일 때만 사용). 플랫폼 파드도 함께 배치되므로 0으로 줄이지 않는다"
   type        = number
   default     = 1
+}
+
+# ---------------------------------------------------------------------------
+# Karpenter (GPU 노드를 학습 때만 Spot으로)
+# ---------------------------------------------------------------------------
+variable "enable_karpenter" {
+  description = "true면 관리형 GPU 노드그룹 대신 Karpenter NodePool이 GPU 노드를 필요할 때만 띄운다"
+  type        = bool
+  default     = true
+}
+
+variable "karpenter_chart_version" {
+  description = "Karpenter Helm 차트 버전 (Kubernetes 1.36은 1.13 이상 필요)"
+  type        = string
+  default     = "1.15.1"
+}
+
+variable "gpu_capacity_types" {
+  description = "GPU 노드 구매 방식. 둘 다 적으면 Spot을 먼저 시도하고, 용량이 없을 때 온디맨드로 넘어간다. Spot만 쓰려면 [\"spot\"]"
+  type        = list(string)
+  default     = ["spot", "on-demand"]
+
+  validation {
+    condition     = length(var.gpu_capacity_types) > 0 && alltrue([for t in var.gpu_capacity_types : contains(["spot", "on-demand"], t)])
+    error_message = "gpu_capacity_types에는 \"spot\", \"on-demand\"만 쓸 수 있습니다."
+  }
+}
+
+variable "gpu_instance_families" {
+  description = "Karpenter가 고를 수 있는 GPU 인스턴스 계열. 여러 계열을 허용할수록 Spot을 구하기 쉽고 싸다 (g6=L4, g5=A10G, g4dn=T4)"
+  type        = list(string)
+  default     = ["g6", "g5", "g4dn"]
+}
+
+variable "gpu_node_limit" {
+  description = "Karpenter가 동시에 띄울 수 있는 GPU 개수 상한 (과금 폭주 방지)"
+  type        = number
+  default     = 1
+}
+
+variable "burst_capacity_types" {
+  description = "파이프라인 단계용 임시 CPU 노드(burst)의 구매 방식"
+  type        = list(string)
+  default     = ["spot", "on-demand"]
+
+  validation {
+    condition     = length(var.burst_capacity_types) > 0 && alltrue([for t in var.burst_capacity_types : contains(["spot", "on-demand"], t)])
+    error_message = "burst_capacity_types에는 \"spot\", \"on-demand\"만 쓸 수 있습니다."
+  }
+}
+
+variable "burst_cpu_limit" {
+  description = "임시 CPU 노드의 vCPU 합계 상한. 0이면 burst NodePool을 만들지 않는다"
+  type        = number
+  default     = 8
 }
 
 # ---------------------------------------------------------------------------

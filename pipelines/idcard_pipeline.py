@@ -27,6 +27,9 @@ def _cpu(task, cpu: str = "500m", mem: str = "1Gi", mem_limit: str = "4Gi"):
     # 같은 태그로 이미지를 다시 푸시해도 노드 캐시(IfNotPresent)가 아니라 새 이미지를 쓰도록 한다.
     # 레이어는 캐시를 그대로 쓰고 매니페스트 다이제스트만 확인하므로 추가 비용이 거의 없다.
     kubernetes.set_image_pull_policy(task, "Always")
+    # 일반 노드에 자리가 없으면 Karpenter의 임시 CPU 노드(NodePool burst, taint workload=batch)로 갈 수 있게 한다.
+    # 자리가 있으면 그대로 일반 노드에서 돌고, Karpenter를 쓰지 않는 구성에서는 아무 영향이 없다.
+    kubernetes.add_toleration(task, key="workload", operator="Equal", value="batch", effect="NoSchedule")
     return task
 
 
@@ -57,15 +60,18 @@ def idcard_pipeline(
     val = _cpu(validate_data(dataset_uri=gen.output))
 
     tr = train(dataset_uri=gen.output, mlflow_uri=mlflow_uri, epochs=epochs, batch_size=batch_size, lr=lr)
-    # GPU 노드(g6.xlarge, 할당 가능 CPU 3.92)에는 taint가 없어 플랫폼·추론 파드도 함께 올라간다.
-    # 요청을 2코어로 두면 남은 CPU가 모자라 GPU가 비어 있어도 Pending이 된다(EKS 실측 20분 대기).
-    # CPU limit은 두지 않으므로 학습 중에는 노드의 남는 코어를 그대로 쓴다.
+    # CPU 요청은 1코어로 둔다. 관리형 GPU 노드(taint 없음)를 쓰는 구성에서는 플랫폼·추론 파드와 CPU를 나눠 써서
+    # 2코어 요청이 Pending이 됐다(EKS 실측 20분 대기). CPU limit이 없으므로 학습 중에는 남는 코어를 그대로 쓴다.
     _cpu(tr, cpu="1", mem="6Gi", mem_limit="12Gi")
     tr.after(val)
     tr.set_caching_options(False)
     tr.set_accelerator_type("nvidia.com/gpu").set_accelerator_limit(1)
+    # node-role=gpu 노드에만 배치한다. Karpenter 구성에서는 이 파드가 Pending이 되는 순간 GPU 노드(Spot 우선)가 뜨고,
+    # 그 노드에는 nvidia.com/gpu taint가 걸려 있어 아래 toleration을 가진 파드만 올라간다.
     kubernetes.add_node_selector(tr, "node-role", "gpu")
     kubernetes.add_toleration(tr, key="nvidia.com/gpu", operator="Exists", effect="NoSchedule")
+    # Spot 노드는 2분 전 통보만 하고 회수될 수 있다. 회수되면 학습을 처음부터 한 번 더 시도한다.
+    tr.set_retry(num_retries=1)
     # DataLoader 워커용 공유 메모리
     kubernetes.empty_dir_mount(tr, volume_name="dshm", mount_path="/dev/shm", medium="Memory", size_limit="2Gi")
 

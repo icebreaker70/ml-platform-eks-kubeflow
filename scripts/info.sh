@@ -7,6 +7,7 @@ cat <<EOF
 Kubeflow 대시보드 : http://${HOST}/            (Dex: ${KF_USER_EMAIL} / .env의 KF_USER_PASSWORD)
 Kubeflow Pipelines: http://${HOST}/_/pipeline/
 MLflow            : http://${HOST}/mlflow/      (먼저 대시보드에 로그인)
+Tensorboards      : http://${HOST}/_/tensorboards/   (make tensorboard 설치 후)
 KServe 추론        : http://${HOST}/serving/${KF_PROFILE_NS}/idcard-recognizer/recognize  (Bearer 토큰)
 허용 IP            : ${ALLOWED_CIDRS:-?}
 EOF

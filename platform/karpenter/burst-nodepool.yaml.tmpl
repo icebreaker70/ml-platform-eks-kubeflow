@@ -1,0 +1,49 @@
+# NodePool burst : 파이프라인 단계(평가·Bento 빌드 등)가 일반 노드에 들어갈 자리가 없을 때만 뜨는 임시 CPU 노드.
+#
+#  관리형 GPU 노드를 없애면 플랫폼 파드가 쓰던 여유(약 4 vCPU)도 함께 사라진다. 그 빈자리를 메운다.
+#  workload=batch taint를 걸어 두어, 이 taint를 허용한 파이프라인 파드만 올라온다
+#  (MySQL · PostgreSQL 같은 플랫폼 파드가 Spot 노드로 옮겨 가지 않도록).
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: burst
+spec:
+  template:
+    metadata:
+      labels:
+        node-role: burst
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+      taints:
+        - key: workload
+          value: batch
+          effect: NoSchedule
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ${BURST_CAPACITY_TYPES}
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["5"]
+        - key: karpenter.k8s.aws/instance-cpu
+          operator: In
+          values: ["4", "8"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+      expireAfter: 720h
+  limits:
+    cpu: ${BURST_CPU_LIMIT}
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 2m
