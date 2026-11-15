@@ -29,9 +29,11 @@ if kubectl cluster-info >/dev/null 2>&1; then
   fi
 
   log "ALB 삭제 대기"
+  # ALB 이름은 k8s-<Ingress group.name에서 영문·숫자만 남긴 값>-<해시> 형식이다 (group.name = 클러스터 이름).
+  ALB_PREFIX="k8s-$(tr -cd 'a-zA-Z0-9' <<<"${CLUSTER_NAME}")"
   for i in $(seq 1 30); do
     n=$(aws elbv2 describe-load-balancers --region "${AWS_REGION}" \
-          --query "LoadBalancers[?contains(LoadBalancerName, 'k8s-idcardml')].LoadBalancerArn" --output text 2>/dev/null | wc -w)
+          --query "LoadBalancers[?starts_with(LoadBalancerName, '${ALB_PREFIX}-')].LoadBalancerArn" --output text 2>/dev/null | wc -w)
     [[ "${n}" -eq 0 ]] && break
     sleep 10
   done

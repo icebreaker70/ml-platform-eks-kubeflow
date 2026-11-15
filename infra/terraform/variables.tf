@@ -7,7 +7,7 @@ variable "region" {
 variable "cluster_name" {
   description = "EKS 클러스터 이름 (S3/ECR 이름 접두사로도 사용)"
   type        = string
-  default     = "idcard-mlops"
+  default     = "mlops"
 }
 
 variable "kubernetes_version" {

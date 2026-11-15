@@ -112,10 +112,10 @@ kubectl describe node | grep -A8 "Allocated resources"
 EKS 모듈은 생성 후 `desired_size` 변경을 무시하고, `min_size`만 올리면 AWS가 거부하기 때문입니다.
 
 ```bash
-NG=$(aws eks list-nodegroups --cluster-name idcard-mlops --query "nodegroups[?starts_with(@,'cpu-')]|[0]" --output text)
-aws eks update-nodegroup-config --cluster-name idcard-mlops --nodegroup-name "$NG" \
+NG=$(aws eks list-nodegroups --cluster-name mlops --query "nodegroups[?starts_with(@,'cpu-')]|[0]" --output text)
+aws eks update-nodegroup-config --cluster-name mlops --nodegroup-name "$NG" \
   --scaling-config minSize=2,maxSize=3,desiredSize=2
-aws eks wait nodegroup-active --cluster-name idcard-mlops --nodegroup-name "$NG"
+aws eks wait nodegroup-active --cluster-name mlops --nodegroup-name "$NG"
 make infra   # 이후 Terraform 상태와 맞춘다 (변경 없음이 정상)
 ```
 
@@ -212,7 +212,7 @@ make tb-delete        # 인스턴스 삭제 (로그는 PVC에 남음)
 | smoke-test/추론이 `413 Payload Too Large`(HTML) | Host 헤더가 `example.com`(isvc `status.url`의 호스트)인지 — 아니면 대시보드로 라우팅됨 |
 | 추론 `401 Jwt issuer is not configured` | `kubectl -n istio-system get requestauthentication cluster-local-gateway-jwt -o yaml`에 EKS issuer 규칙이 있는지 (`make kubeflow` 재실행) |
 | MLflow 파드 `OOMKilled` / 업로드 `Connection refused` | `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false` 적용 여부 (`make mlflow`) |
-| data-gen에서 S3 AccessDenied | `aws eks list-pod-identity-associations --cluster-name idcard-mlops` 에 `kubeflow-user-example-com/default-editor` 있는지 |
+| data-gen에서 S3 AccessDenied | `aws eks list-pod-identity-associations --cluster-name mlops` 에 `kubeflow-user-example-com/default-editor` 있는지 |
 | image-build 실패 | `kubectl -n buildkit logs deploy/buildkitd` |
 | InferenceService가 Ready 안 됨 | `kubectl -n kubeflow-user-example-com describe ksvc idcard-recognizer-predictor`, 이미지 pull 오류면 Knative `registries-skipping-tag-resolving` 설정 확인 |
 | 추론 403 | `kubectl -n kubeflow-user-example-com get authorizationpolicy allow-idcard-recognizer` |

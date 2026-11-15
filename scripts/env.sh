@@ -28,7 +28,7 @@ if [[ -d "${TF_DIR}/.terraform" ]] && tf_out cluster_name >/dev/null; then
   export KF_PROFILE_NS="$(tf_out kubeflow_profile_namespace)"
 else
   export AWS_REGION="${AWS_REGION:-ap-northeast-2}"
-  export CLUSTER_NAME="${CLUSTER_NAME:-idcard-mlops}"
+  export CLUSTER_NAME="${CLUSTER_NAME:-mlops}"
   export KF_PROFILE_NS="${KF_PROFILE_NS:-kubeflow-user-example-com}"
 fi
 

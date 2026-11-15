@@ -19,7 +19,7 @@ metadata:
     alb.ingress.kubernetes.io/healthcheck-path: /healthz/ready
     alb.ingress.kubernetes.io/success-codes: "200"
     alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=300
-    alb.ingress.kubernetes.io/group.name: idcard-mlops
+    alb.ingress.kubernetes.io/group.name: ${CLUSTER_NAME}
     alb.ingress.kubernetes.io/tags: Owner=${OWNER},Project=${CLUSTER_NAME}
 spec:
   ingressClassName: alb
