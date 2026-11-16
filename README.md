@@ -65,7 +65,18 @@ GPU 노드를 항상 켜 두지 않습니다. 학습 파드가 GPU를 요청하�
 - 처음 학습할 때는 노드가 뜨고 이미지를 받는 시간(수 분)이 더 걸립니다. 진행 상황: `make nodes`, `kubectl get nodeclaims`
 - 설정은 `terraform.tfvars`에서 바꿉니다. Spot만 쓰려면 `gpu_capacity_types = ["spot"]`, 예전처럼 항상 켜진 온디맨드 GPU 노드를 쓰려면 `enable_karpenter = false`. 바꾼 뒤 `make infra`.
 - Spot 노드는 2분 전 통보만 하고 회수될 수 있습니다. 학습 단계는 한 번 자동 재시도합니다.
-- 이 구성은 `terraform plan`과 매니페스트 스키마 검증까지만 했고, **EKS에서 아직 실행해 보지 않았습니다.**
+
+EKS에서 확인한 결과 (클러스터 `mlops`, 2026-11-16, 신분증 파이프라인 기본값 실행):
+
+| 항목 | 결과 |
+|---|---|
+| 평소 노드 | 관리형 일반 노드 2대(`m6i.xlarge`, 온디맨드). Karpenter 노드 0대 |
+| GPU 노드 | 학습 파드가 Pending이 되자 Spot `g4dn.xlarge` 기동 — 요청 후 약 45초에 노드 준비 완료 |
+| 임시 CPU 노드 | 평가 단계부터 Spot `c8i-flex.xlarge` 기동(약 33초), 이후 단계를 모두 처리 |
+| 파이프라인 | 20/20 성공, 28분 24초 (학습 15분 14초, T4 GPU) |
+| 회수 | GPU 노드는 학습 종료 5분 뒤, 임시 노드는 2분 뒤 비우기 시작 → 일반 노드 2대로 복귀 |
+
+- 확인하지 못한 것: Spot 회수가 실제로 일어났을 때의 재시도, 온디맨드로 넘어가는 경우. GPU 노드가 비우기 시작한 뒤 완전히 삭제되기까지 약 7분이 걸린 이유.
 
 모든 AWS 자원에는 `Owner=sejkim` 태그가 붙습니다 (`terraform.tfvars`의 `owner`). 확인:
 
@@ -195,7 +206,21 @@ make tb-delete        # 인스턴스 삭제 (로그는 PVC에 남음)
 - 접속: `http://<ALB>/tensorboard/kubeflow-user-example-com/movierec/` 또는 대시보드 메뉴 **Tensorboards** (`http://<ALB>/_/tensorboards/`)
 - 로그 PVC는 EBS(ReadWriteOnce)라 한 노드에만 붙습니다. **다시 학습할 때는 `make tb-delete` → `make movierec` → `make tb` 순서**로 진행합니다.
   인스턴스가 떠 있으면 `make movierec`이 제출을 막습니다(`FORCE=1`로 무시).
-- 로컬 학습·TensorBoard 로그·파이프라인 컴파일·매니페스트 빌드는 확인했지만, **EKS에서의 Tensorboard 설치와 접속은 아직 실행해 보지 않았습니다.**
+
+### 실행 결과 (EKS, 2026-11-16)
+
+| 항목 | 결과 |
+|---|---|
+| 파이프라인 `movierec-e20-d16-32-64` | 5/5 성공, 3분 18초 (prepare-data 7초, train-sweep 2분 29초 — 이미지 받기 1분 33초 + 실행 36초) |
+| 지표 (HR@10 / NDCG@10) | 16차원 0.7033 / 0.4526 · 32차원 0.7148 / 0.4657 · 64차원 **0.7197 / 0.4720** — 로컬 실행과 동일 |
+| Tensorboard 인스턴스 | `make tb` 후 약 1분 만에 브라우저에서 접속. Scalars·Distributions·Histograms·Text·HParams·Time Series·Projector 모두 조회됨 |
+| 뷰어 이미지 | 컨트롤러 기본값 `tensorflow/tensorflow:2.5.1`로 `tensorboard 2.21.0`이 쓴 로그를 문제없이 읽음 (Projector는 `INACTIVE` 목록 안에 있음) |
+| 노드 | 학습·Tensorboard 모두 일반 노드에서 실행. GPU 노드와 임시 노드는 뜨지 않음 |
+| MLflow | 실험 `movierec`에 실행 3개 기록 |
+
+- 인스턴스를 만든 직후 Tensorboard 파드가 한 번 교체됩니다(약 20초 뒤). 접속에는 지장이 없었습니다.
+- 로그 PVC는 가용 영역에도 묶입니다. 이번 실행에서는 `ap-northeast-2a`에 만들어져, Tensorboard 파드가 갈 수 있는 일반 노드는 a 영역의 1대였습니다.
+- 아직 해 보지 않은 것: 대시보드 화면에서 인스턴스 만들기(목록 화면까지만 확인), 학습 중 실시간 보기.
 
 ## 문제 해결
 
@@ -207,6 +232,7 @@ make tb-delete        # 인스턴스 삭제 (로그는 PVC에 남음)
 | train 파드 Pending (Karpenter) | 노드가 뜨는 중이면 정상(수 분). 오래 걸리면 `kubectl get nodeclaims`, `kubectl -n kube-system logs deploy/karpenter \| tail -30` — Spot 용량 부족·한도 초과·`gpu_node_limit` 도달 여부 확인 |
 | train 파드 Pending (관리형 GPU 노드) | `kubectl -n kubeflow-user-example-com describe pod <train 파드>`의 이벤트 확인. `Insufficient cpu`면 GPU 노드에 올라간 다른 파드(추론 파드 등) 때문 — 학습 파드 요청은 CPU 1코어 |
 | 플랫폼 파드 Pending | 일반 노드 2대가 꽉 찬 것. `cpu_node_count = 3` 또는 `cpu_instance_type = "m6i.2xlarge"` 후 `make infra` (플랫폼 파드는 Karpenter 노드에 올라가지 않음) |
+| evaluate에서 `Failed to download artifacts … model.pt` (새 클러스터 첫 실행) | 새로 만든 S3 버킷은 전역 주소(`<버킷>.s3.amazonaws.com`)가 한동안 `us-east-1`로 연결됨. MLflow 파드에 `MLFLOW_S3_ENDPOINT_URL`이 있는지 확인: `kubectl -n mlflow get deploy mlflow -o yaml \| grep -A1 S3_ENDPOINT` (없으면 `make mlflow`) |
 | `make infra`에서 `Error locating chart … no cached repo found` | 로컬 Helm 캐시 문제 — `helm repo update` 후 다시 실행 |
 | 노드 수가 `terraform.tfvars`와 다름 | `kubectl get nodes -L node-role` — 수동으로 늘린 노드그룹은 위 "이미 만든 클러스터의 노드 수" 절차로 되돌림 (GPU 2대면 비용 약 1.5배) |
 | smoke-test/추론이 `413 Payload Too Large`(HTML) | Host 헤더가 `example.com`(isvc `status.url`의 호스트)인지 — 아니면 대시보드로 라우팅됨 |

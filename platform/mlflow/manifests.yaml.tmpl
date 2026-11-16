@@ -132,6 +132,11 @@ spec:
             # 클라이언트 다운로드가 S3에서 400(AuthorizationQueryParametersError)으로 실패한다.
             - name: AWS_DEFAULT_REGION
               value: ${AWS_REGION}
+            # presigned URL의 주소를 리전 엔드포인트로 고정한다. 지정하지 않으면 전역 주소(<버킷>.s3.amazonaws.com)로
+            # 만들어지는데, 새로 만든 버킷은 한동안(최대 24시간) 전역 주소가 us-east-1로 연결되어
+            # "the region 'ap-northeast-2' is wrong; expecting 'us-east-1'"(400)으로 다운로드가 실패한다.
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: https://s3.${AWS_REGION}.amazonaws.com
             # MLflow 3.x는 GenAI 평가/트레이스용 백그라운드 작업 프로세스(huey)를 8개쯤 띄운다(각 ~230Mi).
             # 이 실습은 쓰지 않으므로 끈다. 켜 두면 유휴 상태에서 이미 ~1.9Gi라 아티팩트 업로드 중 OOMKilled.
             - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
