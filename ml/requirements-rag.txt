@@ -1,3 +1,8 @@
 # rag 이미지 (6주차: PDF 파싱 · 청킹 · 임베딩 · 색인 · rag-api) — 구현이 진행되며 채운다 (PLAN.md 10.2)
-# 7.1.x는 출시 2주 미만이라 7.0.1로 고정 (2026-11-25)
+# 2026-11-25 기준, 출시 2주 미만 버전 제외 (pypdf 7.1.x, sentence-transformers 6.3.0, psycopg 3.3.9)
+# torch는 Dockerfile에서 CPU 휠(2.14.1)로 먼저 설치한다.
 pypdf==7.0.1
+sentence-transformers==6.2.0
+transformers==5.22.2
+psycopg[binary]==3.3.8
+pgvector==0.5.1

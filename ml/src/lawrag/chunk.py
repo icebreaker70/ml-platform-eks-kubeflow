@@ -149,8 +149,18 @@ def chunk_article(meta: LawMeta, a: Article, addenda_title: str = "", max_chars:
     return chunks
 
 
-def chunk_law(law: ParsedLaw, max_chars: int = DEFAULT_MAX_CHARS) -> list[Chunk]:
+def chunk_law(law: ParsedLaw, max_chars: int = DEFAULT_MAX_CHARS, dedupe_future: bool = True) -> list[Chunk]:
+    """dedupe_future: 시행 예정 청크 중 같은 조 · 같은 범위의 현행 청크와 본문이 같은 것은 뺀다.
+
+    예) 제75조 시행 예정본은 제2항제15호만 바뀌었으므로 그 호가 든 청크만 남는다.
+    빼지 않으면 같은 내용이 검색 top-k 자리를 두 번 차지한다 (로컬 검색에서 확인).
+    """
     chunks = [c for a in law.articles for c in chunk_article(law.meta, a, law.addenda_title, max_chars)]
+    if dedupe_future:
+        current = {(c.part, c.article_key, tuple(c.paragraphs), tuple(c.items), c.body)
+                   for c in chunks if c.status == "현행"}
+        chunks = [c for c in chunks if c.status != "시행예정"
+                  or (c.part, c.article_key, tuple(c.paragraphs), tuple(c.items), c.body) not in current]
     ids = [c.chunk_id for c in chunks]
     if len(ids) != len(set(ids)):
         raise ValueError("chunk_id가 중복됩니다")

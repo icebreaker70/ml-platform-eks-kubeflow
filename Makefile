@@ -6,7 +6,7 @@ ENV := source scripts/env.sh
 .PHONY: help check-tools venv test local-demo infra kubeconfig images kubeflow ingress mlflow extras \
         platform compile pipeline info test-infer destroy \
         movierec-local tensorboard movierec tb tb-delete tb-status nodes \
-        rag-parse-local
+        rag-parse-local rag-db-local rag-index-local rag-search-local
 
 help: ## 명령 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -30,8 +30,23 @@ local-demo: ## 로컬에서 소량 데이터 생성 → 1 epoch 학습 (CPU)
 # ------------------------------------------------- LLM RAG (6주차, 로컬) ----
 LAW_PDF ?= docs/개인정보 보호법(법률)(제21445호)(20260911).pdf
 
+RAGDB_LOCAL_IMAGE ?= pgvector/pgvector:0.8.6-pg17
+LAWRAG := PYTHONPATH=ml/src .venv/bin/python -m lawrag
+
 rag-parse-local: ## 법률 PDF 파싱 · 청킹 → data/law/{articles,chunks}.jsonl + report.md (PDF="..." 로 교체)
-	PYTHONPATH=ml/src .venv/bin/python -m lawrag.prepare --pdf "$${PDF:-$(LAW_PDF)}" --out data/law
+	$(LAWRAG).prepare --pdf "$${PDF:-$(LAW_PDF)}" --out data/law
+
+rag-db-local: ## 로컬 pgvector 컨테이너 (localhost:55432, 데이터는 Docker 볼륨 lawrag-pg)
+	@docker start lawrag-pg >/dev/null 2>&1 || docker run -d --name lawrag-pg -p 127.0.0.1:55432:5432 \
+	  -e POSTGRES_USER=rag -e POSTGRES_PASSWORD=rag -e POSTGRES_DB=rag -v lawrag-pg:/var/lib/postgresql/data \
+	  $(RAGDB_LOCAL_IMAGE) >/dev/null
+	@until docker exec lawrag-pg pg_isready -U rag -d rag >/dev/null 2>&1; do sleep 1; done; echo "lawrag-pg 준비됨"
+
+rag-index-local: rag-db-local ## PDF → bge-m3 임베딩(CPU) → 로컬 pgvector 적재 + 승격
+	$(LAWRAG).index load --pdf "$${PDF:-$(LAW_PDF)}" --promote
+
+rag-search-local: ## 로컬 색인 검색 (Q="질문" K=5)
+	$(LAWRAG).index search "$(Q)" -k $${K:-5}
 
 # ---------------------------------------------------------------- AWS ----
 infra: ## Terraform: VPC, EKS(1.36), 노드그룹, S3, ECR, IAM, ALB 컨트롤러, NVIDIA 플러그인

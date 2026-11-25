@@ -59,8 +59,15 @@ def chunks():
     return chunk_law(parse_pdf(PDF))
 
 
+def test_real_pdf_future_dedupe(chunks):
+    # 제75조 시행 예정본은 제2항제15호만 바뀌었다 → 그 호가 든 청크만 남는다
+    fut75 = [c for c in chunks if c.article_key == "75" and c.status == "시행예정"]
+    assert [(c.paragraphs, c.items[0]) for c in fut75] == [([2], "15")]
+    assert sum(c.status == "시행예정" for c in chunks) == 9
+
+
 def test_real_pdf_chunks(chunks):
-    assert len(chunks) == 146
+    assert len(chunks) == 143
     assert len({c.chunk_id for c in chunks}) == len(chunks)
     assert all(c.status in ("현행", "시행예정") for c in chunks)
     assert max(len(c.body) for c in chunks) <= 1500
