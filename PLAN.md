@@ -1,13 +1,14 @@
-# EKS 기반 ML 플랫폼 실습 — 구현 계획서 (v4)
+# EKS 기반 ML 플랫폼 실습 — 구현 계획서 (v5 초안)
 
-> 최초 작성: 2026-11-13 · 최종 수정: 2026-11-20 · 상태: v4 (4주차 · 5주차 실습 EKS 검증 완료, 릴리즈 `v1.0.0`)
+> 최초 작성: 2026-11-13 · 최종 수정: 2026-11-25 · 상태: v5 초안 (4주차 · 5주차 EKS 검증 완료 · 릴리즈 `v1.0.0`, **6주차 설계 중 — 10장**)
 > 실행 방법은 [README.md](README.md), 해설은 4주차 · 5주차 블로그 글(README 맨 위 링크)
 
 | 주차 | 실습 | 핵심 구성 |
 |---|---|---|
 | 4주차 | 신분증 인식 MLOps 파이프라인 | Kubeflow Pipelines · MLflow · BentoML · KServe, GPU 학습 |
 | 5주차 | Kubeflow Tensorboard + 영화 추천 | Tensorboard 컨트롤러 · 웹 앱, MovieLens BPR 학습, TensorBoard 로깅 |
-| 공통 | 비용 절감 | Karpenter — GPU 노드는 학습 때만 Spot으로 |
+| **6주차** (설계) | **LLM RAG — 개인정보 보호법 Q&A** | KServe + vLLM GPU 서빙, bge-m3 임베딩, pgvector, KFP 색인 파이프라인, MLflow 평가 · 추적 |
+| 공통 | 비용 절감 | Karpenter — GPU 노드는 학습 때만 Spot으로 (6주차 서빙은 온디맨드, 실습 중에만) |
 
 ## 0. 변경 이력
 
@@ -20,7 +21,8 @@
 | v3.2 | 11-13 | 일반 노드를 `m6i.xlarge` × 2로 변경 (GPU 노드 `g6.xlarge` × 1 유지) |
 | v3.3 | 11-14 | EKS 실측 반영: 학습 파드 CPU 요청 2 → 1 (taint 없는 GPU 노드에서 `Insufficient cpu`로 20분 Pending), 기본값 실행(10 epoch·3,000장) 통과 기록 |
 | v3.4 | 11-15 | GPU 비용 절감: 관리형 GPU 노드그룹을 Karpenter NodePool로 대체 (Spot 우선, 학습 때만 기동, taint 적용). 파이프라인용 임시 CPU NodePool(burst) 추가 |
-| **v4** | 11-15 ~ 11-20 | **5주차 실습 추가**(Tensorboard 컨트롤러 · 웹 앱, MovieLens 영화 추천, 로그용 PVC). 클러스터 이름 `idcard-mlops` → `mlops`. MLflow presigned URL을 리전 엔드포인트로 고정(`MLFLOW_S3_ENDPOINT_URL`). Karpenter · 5주차 실습 EKS 검증. 릴리즈 `v1.0.0` |
+| v4 | 11-15 ~ 11-20 | **5주차 실습 추가**(Tensorboard 컨트롤러 · 웹 앱, MovieLens 영화 추천, 로그용 PVC). 클러스터 이름 `idcard-mlops` → `mlops`. MLflow presigned URL을 리전 엔드포인트로 고정(`MLFLOW_S3_ENDPOINT_URL`). Karpenter · 5주차 실습 EKS 검증. 릴리즈 `v1.0.0` |
+| **v5 초안** | 11-25 | **6주차 설계 추가**(10장): 개인정보 보호법 Q&A RAG(원본은 미리 내려받은 법률 PDF). vLLM을 KServe로 GPU 서빙(서빙 전용 온디맨드 NodePool), bge-m3 + pgvector, 색인 KFP 파이프라인(평가 통과 시 색인 승격), MLflow 추적. 브랜치 `feature/week6-llm-rag` |
 
 ### 확정된 요구사항
 | 항목 | 결정 |
@@ -65,6 +67,11 @@ AWS EKS 위에 Kubeflow · MLflow · BentoML · KServe를 구성하고, 두 가�
 - `make tensorboard` → Tensorboard 컨트롤러 · 웹 앱, 대시보드 메뉴, 로그용 PVC
 - `make movierec` → MovieLens 학습(임베딩 차원별), PVC에 TensorBoard 로그
 - `make tb` → Tensorboard 인스턴스 생성, 브라우저에서 Scalars · Histograms · Projector · Text · HParams 확인
+
+**6주차 — LLM RAG (설계, 상세는 10장)**
+- `make llm` → LLM 가중치를 S3에 캐시, KServe + vLLM 배포(서빙 전용 GPU 노드 기동)
+- `make rag-data` → 개인정보 보호법 PDF를 S3에 업로드, `make rag-index` → PDF 파싱 → 조문 청킹 → 임베딩 → pgvector 적재 → 평가 → 기준 통과 시 색인 승격
+- `make rag-ask Q="..."` → ALB 경유 질의, 근거 조문 인용이 포함된 답변 반환
 
 ## 2. 설치 제품 버전
 
@@ -367,3 +374,232 @@ GPU Spot 시세 (서울, 2026-11-15 조회, 시간당): `g4dn.xlarge` 약 0.33 �
 | BuildKit TCP 무인증 노출(클러스터 내부) | 실습 범위로 한정. 운영 시 mTLS 또는 NetworkPolicy 적용 필요 |
 | 개인정보 | 합성 데이터만 사용, 응답 전 필드 마스킹. MovieLens는 공개 데이터셋(재배포하지 않음) |
 | KServe predictor 접근 정책을 모두 허용 | 게이트웨이 인증은 유지됨. 운영 시 principal 기반으로 좁힐 것 |
+
+## 10. 6주차 설계 — LLM RAG: 개인정보 보호법 Q&A (v5 초안, 미구현)
+
+> 브랜치 `feature/week6-llm-rag`. 구현 · EKS 검증을 마치면 1 ~ 9장에 합치고 릴리즈 `v1.1.0`으로 올린다.
+
+### 10.1 목표와 범위
+
+"주민등록번호를 수집해도 되나요?" 같은 질문에 **개인정보 보호법 조문을 근거로 인용해** 답하는 RAG 서비스를 EKS에 올린다. 4주차(신분증 인식, 주민번호 마스킹)와 주제가 이어진다.
+
+| 항목 | 결정 |
+|---|---|
+| 문서 | **미리 내려받은 PDF 1개**: `docs/개인정보 보호법(법률)(제21445호)(20260911).pdf` — 국가법령정보센터 출력본, 법률 제21445호, 2026-09-11 시행, 47쪽 |
+| 데이터 경로 | 저장소의 PDF → `make rag-data`가 S3 `datasets/law/<법률번호>-<시행일>/source.pdf`로 올림 → 파이프라인이 S3에서 읽어 파싱. 외부 API는 쓰지 않는다 |
+| 저작권 | 법률은 저작권법 제7조에 따라 보호 대상이 아니다 → 저장소 커밋 · S3 저장 가능 |
+| LLM | **직접 GPU 서빙** — KServe + vLLM, 8B급 Instruct 모델 (10.2) |
+| 임베딩 | `BAAI/bge-m3` (다국어, 1024차원), CPU 실행 |
+| 벡터 저장소 | PostgreSQL 17 + pgvector, 클러스터 내부 StatefulSet |
+| 답변 규칙 | 검색된 조문만 근거로 답하고 「개인정보 보호법」 제N조(제M항)를 인용한다. 근거가 없으면 "찾지 못함". 시행 예정 조문을 근거로 쓰면 시행일을 밝힌다. 모든 답변 끝에 "법률 자문이 아님" 안내 |
+| 범위 밖 | 시행령 · 고시 · 판례 · 해석례(같은 방식으로 PDF를 추가하면 확장 가능), 재순위(reranker), 대화 기록(멀티턴), 미세조정, 다중 GPU, 스캔 PDF(OCR) |
+
+### 10.2 설치 제품 버전 (2026-11-25 조회, 출시 2주 미만 제외 원칙 유지)
+
+| 제품 | 고정 버전 | 상태 | 비고 |
+|---|---|---|---|
+| vLLM (서빙 이미지) | **`vllm/vllm-openai:v0.33.0`** | 구현 시 태그 · CUDA 드라이버 호환 재확인 | 0.33.0은 11-02 출시. 0.34.0(11-16)은 2주 미만이라 제외 |
+| KServe | 0.21.0 (기존) | 확인 | 내장 Hugging Face 런타임(`kserve/huggingfaceserver:v0.21.0`)은 vLLM 0.24 계열이라 쓰지 않고, 4주차처럼 **커스텀 predictor 컨테이너**로 vLLM 이미지를 직접 지정한다 |
+| LLM | **`Qwen/Qwen3-8B-FP8`** (기본) | 구현 시 모델 카드 · 한국어 품질 확인 | Apache-2.0. FP8 가중치 약 9 GB라 L4 24 GB에 KV 캐시 여유가 크다. thinking 모드는 끈다(`chat_template_kwargs.enable_thinking=false`) |
+| LLM 비교 후보 | `Qwen3.5-9B` (2026-03, Apache-2.0) | 구현 시 확인 | 평가 세트(10.6)로 기본 모델과 비교해서 좋으면 교체. 라이선스가 모델 크기별로 다른 Qwen3.8 계열은 제외 |
+| 임베딩 모델 | `BAAI/bge-m3` | 확인 | MIT, 1024차원, 최대 8192 토큰, 100개 이상 언어 |
+| sentence-transformers | 6.2.0 (10-21) | 구현 시 torch 2.14.1 · transformers 5.x 호환 확인 | 임베딩 계산 |
+| **pypdf** | 7.1.x | 구현 시 출시일 확인 후 고정 | PDF 텍스트 추출. 순수 Python이라 이미지가 가볍다. 이 PDF에서 추출 품질 확인함(10.4) |
+| pgvector 이미지 | **`pgvector/pgvector:0.8.6-pg17`** | 구현 시 태그 재확인 | 0.8.7은 출시일이 2주 이내일 수 있어 보류. CVE-2026-3172(병렬 HNSW 빌드)는 0.8.2에서 수정됨 |
+| psycopg / pgvector(Python) / openai(Python) | 구현 시 고정 | 미확인 | DB 접속, 벡터 타입, vLLM OpenAI 호환 API 호출 |
+| FastAPI / uvicorn | 구현 시 고정 | 미확인 | RAG API |
+| MLflow | 3.17.2 (기존) | 확인 | GenAI tracing · 평가 |
+
+### 10.3 아키텍처
+
+```
+ 사용자 (허용 IP만) ── ALB ── istio-ingressgateway (Dex 쿠키 / SA 토큰 인증, 기존)
+                                ├─ /rag/          rag-api (FastAPI, 질의 화면 + /rag/ask)
+                                └─ /mlflow/       MLflow (트레이스 · 평가 결과 조회)
+
+ kubeflow-user-example-com (Istio 사이드카)
+ ├─ rag-api Deployment (일반 노드, CPU 1 · 메모리 4Gi)
+ │    질문 → 주민번호 패턴 마스킹(4주차 postprocess 재사용) → bge-m3 임베딩 → pgvector 검색(top-k 5)
+ │    → 프롬프트 조립 → vLLM 호출 → 인용 조문 검증 → 응답 + MLflow 트레이스
+ └─ InferenceService law-llm (KServe 서버리스, vLLM 컨테이너, GPU 1, minReplicas 1 · maxReplicas 1)
+      storageUri: s3://<bucket>/models/qwen3-8b-fp8/  → storage-initializer가 /mnt/models로 내려받음
+      클러스터 내부 전용 (networking.knative.dev/visibility: cluster-local), rag-api · 파이프라인만 허용
+
+ rag (사이드카 없음, mlflow 네임스페이스와 같은 방식)
+ └─ ragdb StatefulSet (pgvector/pgvector, gp3 PVC 10Gi, 일반 노드)
+
+ S3 datasets/law/21445-20260911/source.pdf ← make rag-data (저장소의 PDF)
+ Karpenter NodePool gpu-serving (신규): node-role=gpu-serving, taint nvidia.com/gpu, 온디맨드 기본, g6.xlarge
+```
+
+**설계 결정**
+- **vLLM은 KServe 커스텀 컨테이너로 띄운다.** 내장 런타임은 vLLM 버전을 고를 수 없다. 4주차와 같은 InferenceService · 카나리 경험을 그대로 쓸 수 있고, OpenAI 호환 API(`/v1/chat/completions`)를 그대로 노출한다.
+- **서빙 전용 NodePool을 따로 둔다.** 기존 `gpu` NodePool은 학습용(Spot 우선, 상한 1)이다. 서빙 파드가 거기에 올라가면 학습과 GPU를 다투고 Spot 회수 때 서비스가 끊긴다. `gpu-serving`은 온디맨드 `g6.xlarge`(L4, FP8 지원)로 고정하고 GPU 상한도 따로 1을 둔다. 실습 중 비용을 줄이려면 `llm_capacity_types = ["spot", "on-demand"]`로 바꿀 수 있다.
+- **가중치는 S3에 캐시한다.** 노드가 새로 뜰 때마다 Hugging Face에서 내려받지 않도록 `make llm-cache`가 클러스터 안의 Job으로 한 번 복사한다(HF → `s3://<bucket>/models/`). KServe storage-initializer는 Pod Identity로 S3를 읽는다.
+- **콜드 스타트에 대비한다.** 노드 기동(약 1분), vLLM 이미지 받기(약 10 GB), 가중치 로딩을 합치면 첫 Ready까지 5 ~ 10분 걸릴 것으로 본다. Knative `progress-deadline`을 30분으로 늘리고 `minReplicas: 1`로 scale-to-zero를 끈다.
+- **임베딩은 rag-api 안에서 CPU로 돌린다.** 질의 1건 임베딩은 CPU로 충분하고, 색인 대상도 약 200 청크라 GPU가 필요 없다. 임베딩용 KServe를 따로 두지 않아 구성 요소가 하나 줄어든다.
+- **pgvector는 MLflow DB와 분리한다.** 이미지가 다르고(pgvector 확장), 색인을 다시 만들 때 MLflow에 영향을 주지 않기 위해서다.
+- **PDF를 원본으로 쓴다.** 외부 API 인증 · 호출 IP 등록이 필요 없고, 실습 결과가 같은 PDF에서 항상 재현된다. 대신 PDF 텍스트 정리(머리말 · 줄바꿈 · 시행 예정 조문 구분)를 직접 처리해야 하며, 이것이 RAG 데이터 준비 단계의 실습 포인트가 된다.
+- **LangChain 같은 프레임워크는 쓰지 않는다.** 검색 → 프롬프트 → 호출 흐름을 코드로 직접 보여주는 것이 실습 목적에 맞고, 버전 고정 대상도 줄어든다.
+
+### 10.4 PDF 파싱 · 청킹 · 색인
+
+**PDF 확인 결과** (2026-11-25, pypdf 7.1.1로 추출)
+
+| 항목 | 내용 |
+|---|---|
+| 형식 | 텍스트 레이어 있음(OCR 불필요), 47쪽, 약 9.4만 자. 1쪽 머리에 `[시행 2026. 9. 11.] [법률 제21445호, 2026. 3. 10., 일부개정]` |
+| 구조 | 장 10개(`제6장 삭제` 포함) · 절, 본문 조 표기 135개, `부칙 <제21445호,2026. 3. 10.>` 아래 부칙 조 6개 |
+| **시행 예정 조문** | 6개 조(제2조, 제7조의9, 제28조의8, 제32조의2, 제37조의2, 제75조)가 **현행본과 시행 예정본으로 두 번** 실려 있다. 예정본 끝에 `[시행일: 2027. 3. 9.] 제2조`처럼 표시가 붙는다(시행일 2027-03-09, 2027-07-01) |
+| 삭제 조문 | 제53조처럼 본문이 `삭제 <…>`뿐인 조 |
+| 길이 | 조 단위 중앙값 479자, 1,500자 초과 7개(제25조 1.6천 · 제31조 1.8천 · 제64조의2 3.4천 · 제75조 3.9천 자) |
+| 잡음 | 쪽마다 `법제처 N 국가법령정보센터` + `개인정보 보호법` 머리말, 1쪽 담당 부서 연락처 8줄, 단어 중간 줄바꿈(`해\n당하는`), 개정 이력 꼬리표 `<개정 2014. 3. 24., …>` · `[본조신설 …]` |
+
+**처리 단계**
+
+| 단계 | 내용 |
+|---|---|
+| 추출 | pypdf로 쪽별 텍스트 → 머리말 · 꼬리말 · 1쪽 연락처 제거 |
+| 메타데이터 | 1쪽 머리에서 법률 번호 · 공포일 · 시행일을 읽는다. 파일 이름과 다르면 중단 |
+| 구조 분해 | 장 · 절 제목을 추적하면서 `^제N조(의M)?\(제목\)`으로 조를 나누고, `부칙` 이후는 부칙으로 따로 표시 |
+| 시행 상태 | 같은 조 번호가 두 번 나오고 뒤의 것에 `[시행일: …]`이 있으면 앞 = `현행`, 뒤 = `시행예정(effective_from=…)`. 중복 없이 `[시행일]`만 있는 조도 `시행예정` |
+| 정리 | 줄바꿈을 붙이되 항(①), 호(1.), 목(가.), 꼬리표 앞에서는 줄을 유지. 개정 이력 꼬리표는 본문에서 빼서 메타데이터 `history`로 보관(임베딩 잡음 제거) |
+| 제외 | `삭제` 조문(본문 없음). 부칙은 포함(시행일 질문에 필요) |
+| 청킹 | **조 단위**가 기본. 약 1,500자(약 800토큰) 초과면 **항 단위**로 나누고 조 제목을 각 조각에 반복. 항 하나가 그래도 길면(제75조) 호 묶음 단위 |
+| 청크 머리말 | `[개인정보 보호법 제3장 제24조의2(주민등록번호 처리의 제한) 제1항]` (시행 예정이면 `· 2027-03-09 시행 예정` 추가) → 조문 번호로 묻는 질문의 검색률을 올린다 |
+| 청크 메타데이터 | 장 · 절, 조 번호(`24의2`), 조 제목, 항 번호, 상태(현행/시행예정/부칙), 시행일, 법률 번호, 개정 이력, 원문 쪽 번호, 색인 버전 |
+| 저장 | 테이블 `law_chunks(index_version, chunk_id, ..., embedding vector(1024))`, HNSW 인덱스(cosine). 서비스 중인 색인 버전은 `active_index` 테이블 한 줄로 관리 → 승격 = 이 값 교체 |
+| 검색 | 벡터 유사도 top-k 5. 질문에 "제N조"가 있으면 해당 조문을 우선 포함(정규식 매칭). 같은 조의 현행 · 시행예정본이 함께 걸리면 둘 다 넘기고 프롬프트에서 구분 |
+
+예상 규모: 색인 대상 조 약 135개(현행 128 + 시행 예정 7 내외) + 부칙 6개 → 청크 약 170 ~ 220개, CPU 임베딩 1 ~ 2분.
+
+### 10.5 질의 처리 (rag-api)
+
+```
+POST /rag/ask {"question": "...", "index_version": (선택, 평가용)}
+ ① 마스킹: 주민번호 패턴을 질문 · 로그에서 가림 (idcard.postprocess 재사용)
+ ② 검색: bge-m3 임베딩 → pgvector top-k 5 (+ 조문 번호 직접 매칭)
+ ③ 프롬프트: 시스템 규칙(근거 조문만 사용, 인용 형식, 시행 예정이면 시행일 명시, 모르면 모른다고) + 검색된 조문 + 질문
+ ④ 생성: vLLM /v1/chat/completions (temperature 0.2, max_tokens 768, thinking 끔)
+ ⑤ 검증: 답변에서 인용(「…」 제N조)을 추출 → 검색된 조문에 없는 인용이면 citations_verified=false
+ ⑥ 응답: {answer, citations[], retrieved[(조, 항, 상태, 시행일, 쪽)], citations_verified, index_version, disclaimer}
+```
+- 모든 단계를 MLflow 트레이스로 남긴다(실험 `law-rag`). 질문은 ① 이후의 마스킹된 값만 기록한다.
+- `GET /rag/`는 질문 입력과 근거 조문(원문 쪽 번호 포함) 펼쳐보기만 있는 단순 HTML 화면.
+- 스트리밍은 1차 범위에서 제외(Knative · Istio 경유 SSE는 구현 후 확인).
+
+### 10.6 색인 파이프라인 (`pipelines/rag_index_pipeline.py`)
+
+```
+[parse-pdf] → [chunk] → [embed (CPU)] → [load-index] → [evaluate] ─┬─ 기준 통과 → [promote-index]
+ S3 PDF →       조/항        bge-m3          새 index_version     │
+ 조문 JSON                                                         └─ 미달: 종료 (서비스 중 색인 유지)
+```
+
+| 컴포넌트 | 이미지 | 내용 |
+|---|---|---|
+| parse-pdf | rag (신규) | 파라미터 `pdf_uri`(기본 `s3://<bucket>/datasets/law/21445-20260911/source.pdf`) → 조문 JSON 아티팩트 + 파싱 리포트(조 수, 시행 예정 조, 삭제 조, 제거한 머리말 수). **검사**: 조 번호가 빠짐없이 이어지는지, 중복이 시행 예정 표시로 모두 설명되는지 → 실패 시 중단 |
+| chunk | rag | 조 · 항 분할, 통계(청크 수, 길이 분포, 상태별 수) Markdown 리포트 |
+| embed | rag | bge-m3 CPU 임베딩. CPU 2코어 · 메모리 6Gi, `workload=batch` 허용(burst 노드 가능) |
+| load-index | rag | `index_version = <법률번호>-<시행일>-<실행 ID 앞 8자>`로 적재, HNSW 인덱스 생성 |
+| evaluate | rag | 평가 세트로 검색 지표 계산. `eval_generation=true`면 게이트웨이 경유 rag-api를 `index_version` 지정으로 호출해 생성 지표도 계산(4주차 smoke-test와 같은 SA 토큰 방식). 결과는 KFP Metrics + MLflow |
+| promote-index | rag | `active_index` 교체, MLflow 실행에 `promoted=true` 태그 |
+
+PDF의 SHA-256을 MLflow 실행 파라미터로 남겨, 어떤 원본으로 만든 색인인지 추적한다. 법이 개정되면 새 PDF를 `docs/`에 넣고 `make rag-data PDF=...` → `make rag-index`.
+
+**평가 세트** (`ml/src/lawrag/eval/qa.jsonl`, 약 30문항, 직접 작성 · 검토)
+- 항목: 질문, 정답 조문 목록(예: `24의2`), 기대 상태(현행/시행예정), 핵심 답 요지
+- 종류: 조문 번호로 묻기 / 상황으로 묻기("CCTV를 설치하려면?") / 여러 조를 함께 봐야 하는 질문 / **시행 예정 조문 질문**("인공지능기술의 정의는 언제부터?") / **답이 없는 질문** 몇 개(거절해야 정답)
+
+| 지표 | 계산 | 승격 기준 (초안) |
+|---|---|---|
+| Recall@5 | 정답 조문이 top-5 안에 있는 비율 | ≥ 0.80 |
+| MRR@5 | 정답 조문 순위 역수 평균 | 기록만 |
+| 인용 정확도 | 답변 인용 중 정답 조문 또는 검색된 조문에 있는 비율 | ≥ 0.90 (`eval_generation=true`일 때) |
+| 시행 상태 정확도 | 시행 예정 조문을 근거로 쓴 답변이 시행일을 밝힌 비율 | 기록만 |
+| 거절 정확도 | 답이 없는 질문에 "찾지 못함"으로 답한 비율 | 기록만 |
+| 근거 일치(LLM 판정) | MLflow GenAI 평가 + 판정 모델은 같은 vLLM 엔드포인트 | 기록만 — 자기 답을 자기가 채점하는 편향이 있어 기준으로 쓰지 않는다 |
+
+### 10.7 인프라 · 플랫폼 변경
+
+| 대상 | 변경 |
+|---|---|
+| `infra/terraform/variables.tf` | `enable_llm_serving`(기본 true), `llm_capacity_types`(기본 `["on-demand"]`), `llm_instance_types`(기본 `["g6.xlarge"]`), `llm_gpu_limit`(기본 1). 6주차 실습 때는 `cpu_node_count = 3` 권장 |
+| `infra/terraform/storage.tf` | ECR `mlops/rag`(파이프라인 · rag-api 공용 이미지) |
+| `infra/terraform/iam.tf` | Pod Identity: `kubeflow-user-example-com/law-llm` → S3 `models/*` 읽기, `kubeflow-user-example-com/default-editor`에 `models/*` 쓰기 추가(캐시 Job). `datasets/law/*`는 기존 `datasets/*` 권한으로 충분 |
+| `infra/terraform/outputs.tf` | `karpenter_nodepool_settings`에 llm 값 추가 |
+| `platform/karpenter/llm-nodepool.yaml.tmpl` (신규) | NodePool `gpu-serving`. 비면 5분 뒤 정리(`WhenEmpty`), `expireAfter: 720h` |
+| `platform/rag/` (신규) | `ragdb.yaml.tmpl`(네임스페이스 `rag` · StatefulSet · Service · Secret), `llm-cache-job.yaml.tmpl`, `llm-isvc.yaml.tmpl`, `rag-api.yaml.tmpl`(Deployment · Service · VirtualService `/rag/`), `authz.yaml.tmpl`(law-llm은 rag-api · default-editor principal만 허용), `install.sh` |
+| Knative 설정 | `progress-deadline` 30분 (InferenceService 주석으로 지정) |
+| `scripts/destroy.sh` | NodePool `gpu-serving` 삭제, `rag` 네임스페이스 PVC 삭제 추가 |
+| `images/rag/Dockerfile` (신규) | Python 3.12 + CPU torch 2.14.1 + sentence-transformers + pypdf + psycopg + openai + FastAPI + mlflow + kfp. bge-m3 가중치는 이미지에 넣지 않고 S3 캐시에서 받는다 |
+| `docs/개인정보 보호법(법률)(제21445호)(20260911).pdf` | 저장소에 커밋(282 KB, 저작권 보호 대상 아님) |
+
+### 10.8 Makefile 타깃 (신규)
+
+| 타깃 | 내용 |
+|---|---|
+| `make rag-data` | `PDF=`(기본: 위 PDF) → 1쪽에서 법률 번호 · 시행일을 읽어 `s3://<bucket>/datasets/law/<번호>-<시행일>/source.pdf` 업로드 |
+| `make rag-parse-local` | 로컬에서 PDF 파싱 · 청킹만 실행 → `data/law/chunks.jsonl` + 리포트 (클러스터 없이 확인) |
+| `make rag-platform` | ragdb + Secret + AuthorizationPolicy + rag-api 배포 |
+| `make llm-cache` | LLM · bge-m3 가중치 HF → S3 (한 번만, Job 완료 대기) |
+| `make llm` | InferenceService `law-llm` 배포 → GPU 노드 기동 → Ready 대기 (`LLM_MODEL=` 로 교체) |
+| `make llm-down` | InferenceService 삭제 → 5분 뒤 GPU 노드 정리 (**실습 후 꼭 실행**) |
+| `make rag-index` | 색인 파이프라인 제출 (`EVAL_GENERATION=true` 기본, LLM이 없으면 `false`) |
+| `make rag-ask Q="..."` | ALB 경유 질의, JSON 출력 |
+| `make rag-status` | 서비스 중 색인 버전, 청크 수, law-llm 상태, GPU 노드 |
+
+`.env.example`에 `LLM_MODEL=Qwen/Qwen3-8B-FP8`, `EMBED_MODEL=BAAI/bge-m3`, `RAGDB_IMAGE=pgvector/pgvector:0.8.6-pg17`, `VLLM_IMAGE=vllm/vllm-openai:v0.33.0` 추가.
+
+### 10.9 디렉터리 (추가분)
+
+```
+docs/               개인정보 보호법(법률)(제21445호)(20260911).pdf
+ml/src/lawrag/      pdfparse(추출 · 정리 · 조/부칙 분해 · 시행 상태), chunk(조 · 항 분할), embed, store(pgvector),
+                    retrieve, prompt, answer(생성 · 인용 검증), evaluate, eval/qa.jsonl
+ml/rag_api/         app.py(FastAPI), static/index.html
+ml/tests/           test_lawrag_pdfparse(실제 PDF로 조 수 · 시행 예정 6건 · 머리말 제거 확인),
+                    test_lawrag_chunk, test_lawrag_citation, test_lawrag_prompt (네트워크 · GPU 없이)
+pipelines/          rag_index_pipeline.py, run_rag.py
+platform/rag/       10.7
+images/rag/         Dockerfile
+```
+
+### 10.10 구현 순서와 검증 계획
+
+1. **로컬** — PDF 파싱 · 청킹 단위 테스트(`make rag-parse-local`), 로컬 Docker pgvector에 색인, 작은 모델(예: 0.6B급)을 CPU로 띄워 rag-api 전체 흐름 확인, 평가 세트 작성
+2. **EKS 플랫폼** — `gpu-serving` NodePool, ragdb, `make rag-data`, `make llm-cache` → `make llm` (첫 Ready 시간, GPU 메모리, 초당 토큰 수 기록)
+3. **파이프라인** — `make rag-index` 2회(두 번째는 KFP 캐시로 parse-pdf · embed 재사용 확인), 승격 · 미달 경로 모두 확인
+4. **질의** — `make rag-ask`, 브라우저 `/rag/`, MLflow 트레이스 확인, 토큰 없이 403
+5. **정리** — `make llm-down` 후 GPU 노드 0대, `make destroy` 잔존 자원 없음
+
+기록할 값: 첫 Ready까지 시간, 질의 지연(검색 / 생성 분리), Recall@5 · 인용 정확도, 시간당 비용.
+
+### 10.11 비용 (6주차 추가분, 서울, 대략)
+
+| 항목 | 시간당 (USD) |
+|---|---|
+| GPU 서빙 `g6.xlarge` 온디맨드 (`make llm` ~ `make llm-down` 동안) | 약 1.0 (Spot으로 바꾸면 약 0.47) |
+| 일반 노드 1대 추가 (`cpu_node_count = 3`) | 약 0.24 |
+| ragdb PVC 10 GiB · S3 모델 캐시 약 12 GB | 월 1 미만 |
+| **합계 (기존 + 6주차, LLM 기동 중)** | **시간당 약 2.0** — 4시간 실습이면 약 8 |
+
+### 10.12 위험 요소와 대응
+
+| 위험 | 대응 |
+|---|---|
+| GPU 서빙 노드를 켜 둔 채 방치 | `make llm-down` 안내를 README · `make info`에 표시. `make destroy`가 NodePool을 먼저 지움 |
+| vLLM 이미지의 CUDA와 AL2023 NVIDIA AMI 드라이버 불일치 | 구현 1단계에서 드라이버 버전 확인. 맞지 않으면 vLLM 직전 버전으로 낮춤 |
+| 첫 기동이 Knative 기한을 넘김 | `progress-deadline` 30분, 가중치 S3 캐시. 노드에 이미지가 남아 있으면 두 번째부터 빠름 |
+| FP8 모델의 한국어 품질 저하 | 평가 세트로 bf16(약 16 GB, `max-model-len` 8192로 제한)과 비교 |
+| Qwen3 thinking 출력(`<think>`)이 답변에 섞임 | `enable_thinking=false`, 응답 후처리에서 태그 제거 |
+| **현행 · 시행 예정 조문을 섞어 답함** | 청크에 상태 · 시행일 메타데이터와 머리말 표시, 프롬프트 규칙, 평가 세트에 시행 예정 질문 포함 |
+| PDF 줄바꿈 처리로 띄어쓰기가 사라짐(`개인정보의\n처리` → `개인정보의처리`) | 검색 영향은 작다고 보고 평가 지표로 확인. 화면 표시용 원문은 줄바꿈을 살린 텍스트를 따로 보관 |
+| 다른 형식의 PDF(다른 출력 양식, 스캔본)를 넣음 | parse-pdf 검사(조 번호 연속성, 중복 설명 여부, 1쪽 메타데이터)에서 중단. 스캔본은 범위 밖 |
+| 법 개정으로 답이 바뀜 | 색인 버전에 법률 번호 · 시행일 포함, 응답에 `index_version` 표시. 새 PDF로 `make rag-data` → `make rag-index` |
+| 모델이 근거 없는 조문을 지어냄 | 인용 검증(⑤) 결과를 응답에 표시, 평가 지표로 승격 차단 |
+| 시행령 · 고시에 있는 내용("대통령령으로 정한다")을 물음 | 1차 범위 밖이라 "법률에는 위임만 있고 세부 내용은 시행령에 있음"으로 답하게 규칙화. 시행령 PDF 추가로 확장 |
+| 법률 자문으로 오인 | 모든 응답 · 화면에 안내 문구. 블로그에도 명시 |
+| 질문에 실제 개인정보 입력 | 주민번호 패턴 마스킹 후에만 로그 · 트레이스 기록. 입력 원문은 저장하지 않음 |
+| 일반 노드 자원 부족 (rag-api 메모리 4Gi + ragdb) | `cpu_node_count = 3`. rag-api는 burst 노드로 보내지 않음(상시 서비스) |
+| law-llm 접근 범위 | cluster-local + principal 기반 AuthorizationPolicy (4주차의 "모두 허용"보다 좁힘) |
