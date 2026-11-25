@@ -7,7 +7,8 @@ ENV := source scripts/env.sh
         platform compile pipeline info test-infer destroy \
         movierec-local tensorboard movierec tb tb-delete tb-status nodes \
         rag-parse-local rag-db-local rag-index-local rag-search-local rag-eval-local \
-        llm-local rag-gen-eval-local rag-api-local
+        llm-local rag-gen-eval-local rag-api-local \
+        images-rag rag-data llm-cache rag-platform rag-index-job llm llm-down rag-ask rag-status
 
 help: ## 명령 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -80,7 +81,7 @@ nodes: ## 노드 · Karpenter NodePool · 구매 방식(Spot/온디맨드) 확�
 kubeconfig: ## kubeconfig 갱신
 	$$($(TF) output -raw configure_kubectl)
 
-images: ## 컴포넌트 이미지 빌드/푸시 (idcard-ml, idcard-builder, mlflow-server)
+images: ## 컴포넌트 이미지 빌드/푸시 (idcard-ml, idcard-builder, mlflow-server). 6주차 rag는 make images-rag
 	bash scripts/build-images.sh
 
 kubeflow: ## Kubeflow 26.10.0 필수 구성 설치
@@ -126,6 +127,35 @@ tb-delete: ## Tensorboard 인스턴스 삭제 (로그는 PVC에 남음)
 
 tb-status: ## Tensorboard 인스턴스 · PVC 상태
 	bash platform/tensorboard/instance.sh status
+
+# ------------------------------------------------- LLM RAG (6주차, EKS) ----
+# 순서: images-rag → rag-data → llm-cache → rag-platform → rag-index-job → llm → rag-ask → (끝나면) llm-down
+images-rag: ## rag 이미지 빌드/푸시 (rag-api · 색인 · 캐시 Job 공용, CPU torch)
+	bash scripts/build-images.sh rag
+
+rag-data: ## 개인정보 보호법 PDF → S3 datasets/law/<번호>-<시행일>/source.pdf (PDF="..." 로 교체)
+	bash platform/rag/install.sh data $${PDF:+"$$PDF"}
+
+llm-cache: ## LLM · bge-m3 가중치 Hugging Face → S3 models/ (클러스터 Job, 한 번만)
+	bash platform/rag/install.sh cache
+
+rag-platform: ## ragdb(pgvector) + rag-api + 접근 정책 (make llm-cache 이후)
+	bash platform/rag/install.sh platform
+
+rag-index-job: ## 색인 Job: PDF → 임베딩 → ragdb → 검색 평가 → Recall@5 ≥ GATE_RECALL(0.8)이면 승격
+	bash platform/rag/install.sh index
+
+llm: ## law-llm(vLLM, Qwen3-8B-FP8) 배포 → GPU 노드(g6.xlarge 온디맨드) 기동 → Ready 대기
+	bash platform/rag/install.sh llm
+
+llm-down: ## law-llm 삭제 → GPU 노드 정리 (실습 후 꼭 실행 — 시간당 약 $1)
+	bash platform/rag/install.sh llm-down
+
+rag-ask: ## ALB 경유 질의 (Q="질문")
+	bash platform/rag/install.sh ask "$(Q)"
+
+rag-status: ## ragdb · rag-api · law-llm · GPU 서빙 노드 · 색인 버전
+	bash platform/rag/install.sh status
 
 info: ## 접속 주소 출력
 	@bash scripts/info.sh

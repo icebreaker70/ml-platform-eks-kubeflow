@@ -66,11 +66,19 @@ resource "helm_release" "nvidia_device_plugin" {
   namespace        = "nvidia-device-plugin"
   create_namespace = true
 
-  # 기본 affinity는 NFD 라벨을 요구하므로 제거하고 node-role=gpu 라벨로 배치한다.
+  # 기본 affinity는 NFD 라벨을 요구하므로 바꾼다. GPU 노드는 두 종류다:
+  #   node-role=gpu          학습용 (관리형 GPU 노드그룹 또는 Karpenter NodePool gpu)
+  #   node-role=gpu-serving  6주차 LLM 서빙용 (Karpenter NodePool gpu-serving)
+  # 플러그인이 없는 노드에는 nvidia.com/gpu 리소스가 생기지 않아 GPU 파드가 계속 Pending이 된다.
   values = [yamlencode({
-    affinity = null
-    nodeSelector = {
-      "node-role" = "gpu"
+    affinity = {
+      nodeAffinity = {
+        requiredDuringSchedulingIgnoredDuringExecution = {
+          nodeSelectorTerms = [{
+            matchExpressions = [{ key = "node-role", operator = "In", values = ["gpu", "gpu-serving"] }]
+          }]
+        }
+      }
     }
   })]
 

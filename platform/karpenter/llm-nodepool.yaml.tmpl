@@ -1,0 +1,46 @@
+# NodePool gpu-serving : 6주차 LLM 서빙(vLLM) 전용 GPU 노드.
+#
+#  학습용 NodePool gpu와 나누는 이유
+#   - 학습은 끝나면 노드를 비우지만, 서빙 파드는 계속 떠 있다. Spot 회수로 서비스가 끊기지 않게 온디맨드가 기본.
+#   - GPU 상한을 따로 둬서 학습(gpu_node_limit)과 서빙(llm_gpu_limit)이 서로의 GPU를 막지 않게 한다.
+#   - 서빙은 FP8을 쓰므로 L4(g6)로 고정한다 (학습용은 g6/g5/g4dn 아무거나).
+#  node-role=gpu-serving 라벨로 학습 파드(nodeSelector node-role=gpu)가 이 노드로 오지 않는다.
+#  LLM 파드가 없으면(make llm-down) 5분 뒤 노드를 지운다.
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-serving
+spec:
+  template:
+    metadata:
+      labels:
+        node-role: gpu-serving    # law-llm 파드의 nodeSelector, NVIDIA device plugin의 affinity
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default             # nodepools.yaml.tmpl의 EC2NodeClass (AL2023 NVIDIA AMI 자동 선택, 루트 100Gi)
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ${LLM_CAPACITY_TYPES}
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ${LLM_INSTANCE_TYPES}
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+      expireAfter: 720h
+  limits:
+    nvidia.com/gpu: ${LLM_GPU_LIMIT}
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m

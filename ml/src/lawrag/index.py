@@ -10,6 +10,7 @@ DB 주소는 RAGDB_DSN (기본: make rag-db-local 컨테이너).
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from datetime import datetime
 
@@ -25,8 +26,24 @@ def make_version(law_no: str, effective: str, suffix: str) -> str:
     return f"{law_no}-{effective.replace('-', '')}-{suffix}"
 
 
+def fetch_pdf(uri: str) -> str:
+    """s3://… 이면 임시 파일로 받아 경로를 돌려준다 (클러스터 색인 Job). 로컬 경로는 그대로."""
+    if not uri.startswith("s3://"):
+        return uri
+    import tempfile
+
+    import boto3
+
+    from .cache import split_s3
+
+    bucket, key = split_s3(uri)
+    path = os.path.join(tempfile.mkdtemp(), os.path.basename(key))
+    boto3.client("s3").download_file(bucket, key, path)
+    return path
+
+
 def cmd_load(args) -> None:
-    law = parse_pdf(args.pdf)
+    law = parse_pdf(fetch_pdf(args.pdf))
     chunks = chunk_law(law, args.max_chars)
     t0 = time.time()
     emb = Embedder(args.model)
@@ -39,7 +56,18 @@ def cmd_load(args) -> None:
     store.load_index(conn, version, law.meta, emb.name, chunks, vecs)
     store.set_metrics(conn, version, {"embed_seconds": round(t2 - t1, 1), "model_load_seconds": round(t1 - t0, 1)})
     print(f"적재: {version} — 청크 {len(chunks)}개, 모델 로딩 {t1 - t0:.1f}초, 임베딩 {t2 - t1:.1f}초")
-    if args.promote:
+    if args.gate_recall is not None:
+        # 검색 평가를 통과해야 승격한다 (KFP 색인 파이프라인의 evaluate → promote와 같은 규칙)
+        from .evaluate import load_qa, metrics, run
+
+        m = metrics(run(load_qa(), emb.encode_query, PgBackend(conn), version, 5), 5)
+        store.set_metrics(conn, version, {"retrieval": m})
+        print(f"검색 평가: recall@5 {m['recall_at_5']} · mrr@5 {m['mrr_at_5']} (기준 ≥ {args.gate_recall})")
+        if m["recall_at_5"] < args.gate_recall:
+            raise SystemExit(f"기준 미달 — 승격하지 않음 (서비스 중: {store.get_active(conn)})")
+        store.promote(conn, version)
+        print(f"승격: active_index = {version}")
+    elif args.promote:
         store.promote(conn, version)
         print(f"승격: active_index = {version}")
 
@@ -77,7 +105,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--pdf", required=True)
     s.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
     s.add_argument("--suffix", default=None)
-    s.add_argument("--promote", action="store_true")
+    s.add_argument("--promote", action="store_true", help="평가 없이 바로 승격")
+    s.add_argument("--gate-recall", type=float, default=None,
+                   help="검색 평가 Recall@5가 이 값 이상일 때만 승격 (예: 0.8)")
     s.set_defaults(func=cmd_load)
 
     s = sub.add_parser("search", help="질문 → 근거 청크 top-k")

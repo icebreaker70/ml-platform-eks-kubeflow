@@ -76,6 +76,12 @@ module "pipeline_pod_identity" {
       actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
       resources = ["${aws_s3_bucket.artifacts.arn}/datasets/*"]
     },
+    # 6주차: 모델 가중치 캐시(make llm-cache Job이 Hugging Face → S3 models/로 복사)
+    {
+      sid       = "ModelCacheRW"
+      actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+      resources = ["${aws_s3_bucket.artifacts.arn}/models/*"]
+    },
     {
       sid       = "EcrAuth"
       actions   = ["ecr:GetAuthorizationToken"]
@@ -102,6 +108,43 @@ module "pipeline_pod_identity" {
       cluster_name    = module.eks.cluster_name
       namespace       = var.kubeflow_profile_namespace
       service_account = "default-editor"
+    }
+  }
+}
+
+# 6주차 LLM RAG 서빙 파드 (프로필 네임스페이스):
+#  - law-llm : vLLM 파드의 init container가 S3 models/<LLM>/ 을 내려받는다
+#  - rag-api : init container가 S3 models/bge-m3/ 을 내려받는다
+# 둘 다 읽기만 한다. 가중치 쓰기는 캐시 Job(default-editor, 위 pipeline 권한)만 한다.
+module "rag_serving_pod_identity" {
+  source  = "terraform-aws-modules/eks-pod-identity/aws"
+  version = "2.10.0"
+
+  name                 = "${var.cluster_name}-rag-serving"
+  attach_custom_policy = true
+  policy_statements = [
+    {
+      sid       = "ListBucket"
+      actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+      resources = [aws_s3_bucket.artifacts.arn]
+    },
+    {
+      sid       = "ModelCacheRead"
+      actions   = ["s3:GetObject"]
+      resources = ["${aws_s3_bucket.artifacts.arn}/models/*"]
+    },
+  ]
+
+  associations = {
+    law_llm = {
+      cluster_name    = module.eks.cluster_name
+      namespace       = var.kubeflow_profile_namespace
+      service_account = "law-llm"
+    }
+    rag_api = {
+      cluster_name    = module.eks.cluster_name
+      namespace       = var.kubeflow_profile_namespace
+      service_account = "rag-api"
     }
   }
 }

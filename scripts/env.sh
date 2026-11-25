@@ -46,7 +46,17 @@ if [[ -n "${ECR_REGISTRY:-}" ]]; then
   export IMAGE_BUILDER="${ECR_PREFIX}/idcard-builder:${IMAGE_TAG}"
   export IMAGE_MLFLOW="${ECR_PREFIX}/mlflow-server:${MLFLOW_VERSION}"
   export IMAGE_RECOGNIZER_REPO="${ECR_PREFIX}/idcard-recognizer"
+  export IMAGE_RAG="${ECR_PREFIX}/rag:${RAG_IMAGE_TAG:-${IMAGE_TAG}}"
 fi
+
+# 6주차 LLM RAG (PLAN.md 10.2)
+export VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.33.0}"
+export AWSCLI_IMAGE="${AWSCLI_IMAGE:-amazon/aws-cli:2.40.1}"
+export RAGDB_IMAGE="${RAGDB_IMAGE:-pgvector/pgvector:0.8.6-pg17}"
+export LLM_MODEL="${LLM_MODEL:-Qwen/Qwen3-8B-FP8}"
+export EMBED_MODEL="${EMBED_MODEL:-BAAI/bge-m3}"
+# S3 캐시 경로 이름: Qwen/Qwen3-8B-FP8 → qwen3-8b-fp8
+model_slug() { tr '[:upper:]' '[:lower:]' <<<"${1##*/}"; }
 
 alb_host() {
   kubectl -n istio-system get ingress kubeflow-alb \

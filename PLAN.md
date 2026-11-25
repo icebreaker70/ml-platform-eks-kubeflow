@@ -398,8 +398,11 @@ GPU Spot 시세 (서울, 2026-11-15 조회, 시간당): `g4dn.xlarge` 약 0.33 �
 
 | 제품 | 고정 버전 | 상태 | 비고 |
 |---|---|---|---|
-| vLLM (서빙 이미지) | **`vllm/vllm-openai:v0.33.0`** | 구현 시 태그 · CUDA 드라이버 호환 재확인 | 0.33.0은 11-02 출시. 0.34.0(11-16)은 2주 미만이라 제외 |
-| KServe | 0.21.0 (기존) | 확인 | 내장 Hugging Face 런타임(`kserve/huggingfaceserver:v0.21.0`)은 vLLM 0.24 계열이라 쓰지 않고, 4주차처럼 **커스텀 predictor 컨테이너**로 vLLM 이미지를 직접 지정한다 |
+| vLLM (서빙 이미지) | **`vllm/vllm-openai:v0.33.0`** | 태그 확인(11-02, amd64 9.7 GB). CUDA 드라이버 호환은 EKS에서 확인 | 0.34.0(11-16)은 2주 미만이라 제외 |
+| KServe | 0.21.0 (기존) | 확인 | 내장 Hugging Face 런타임(`kserve/huggingfaceserver:v0.21.0`)은 vLLM 0.24 계열이라 쓰지 않고, 4주차처럼 **커스텀 predictor 컨테이너**로 vLLM 이미지를 직접 지정한다. 배포 모드 값은 `Standard` · `Knative`(Kubeflow 26.10.0 매니페스트에서 확인, `RawDeployment`는 0.21 매니페스트에 없음) |
+| aws-cli (init container) | **`amazon/aws-cli:2.40.1`** (11-11) | 확인 | S3 → emptyDir 가중치 받기. 2.40.2 이후는 2주 미만 |
+| huggingface-hub / boto3 | **2.4.0** (10-29) / **1.44.2** (기존) | 확인 | 가중치 캐시 Job(`lawrag.cache`), 색인 Job의 S3 PDF 읽기 |
+| 모델 (확인) | `Qwen/Qwen3-8B-FP8`(Apache-2.0) · `BAAI/bge-m3`(MIT) | Hugging Face API로 확인 | bge-m3는 `onnx/` · `imgs/`를 빼고 약 2.3 GB만 캐시 |
 | LLM | **`Qwen/Qwen3-8B-FP8`** (기본) | 구현 시 모델 카드 · 한국어 품질 확인 | Apache-2.0. FP8 가중치 약 9 GB라 L4 24 GB에 KV 캐시 여유가 크다. thinking 모드는 끈다(`chat_template_kwargs.enable_thinking=false`) |
 | LLM 비교 후보 | `Qwen3.5-9B` (2026-03, Apache-2.0) | 구현 시 확인 | 평가 세트(10.6)로 기본 모델과 비교해서 좋으면 교체. 라이선스가 모델 크기별로 다른 Qwen3.8 계열은 제외 |
 | 임베딩 모델 | `BAAI/bge-m3` | 확인 | MIT, 1024차원, 최대 8192 토큰, 100개 이상 언어 |
@@ -423,9 +426,10 @@ GPU Spot 시세 (서울, 2026-11-15 조회, 시간당): `g4dn.xlarge` 약 0.33 �
  ├─ rag-api Deployment (일반 노드, CPU 1 · 메모리 4Gi)
  │    질문 → 주민번호 패턴 마스킹(4주차 postprocess 재사용) → bge-m3 임베딩 → pgvector 검색(top-k 5)
  │    → 프롬프트 조립 → vLLM 호출 → 인용 조문 검증 → 응답 + MLflow 트레이스
- └─ InferenceService law-llm (KServe 서버리스, vLLM 컨테이너, GPU 1, minReplicas 1 · maxReplicas 1)
-      storageUri: s3://<bucket>/models/qwen3-8b-fp8/  → storage-initializer가 /mnt/models로 내려받음
-      클러스터 내부 전용 (networking.knative.dev/visibility: cluster-local), rag-api · 파이프라인만 허용
+ │    bge-m3: init container(aws s3 sync)가 s3://<bucket>/models/bge-m3/ → emptyDir
+ └─ InferenceService law-llm (KServe Standard 모드 = Deployment + Service, vLLM 컨테이너, GPU 1, 레플리카 1)
+      init container(aws s3 sync, UID 1337): s3://<bucket>/models/qwen3-8b-fp8/ → emptyDir /mnt/models
+      주소 http://law-llm-predictor.<ns>.svc.cluster.local/v1 — 클러스터 내부 전용, rag-api principal만 허용
 
  rag (사이드카 없음, mlflow 네임스페이스와 같은 방식)
  └─ ragdb StatefulSet (pgvector/pgvector, gp3 PVC 10Gi, 일반 노드)
@@ -435,10 +439,14 @@ GPU Spot 시세 (서울, 2026-11-15 조회, 시간당): `g4dn.xlarge` 약 0.33 �
 ```
 
 **설계 결정**
-- **vLLM은 KServe 커스텀 컨테이너로 띄운다.** 내장 런타임은 vLLM 버전을 고를 수 없다. 4주차와 같은 InferenceService · 카나리 경험을 그대로 쓸 수 있고, OpenAI 호환 API(`/v1/chat/completions`)를 그대로 노출한다.
+- **vLLM은 KServe 커스텀 컨테이너로 띄운다.** 내장 런타임은 vLLM 버전을 고를 수 없다. OpenAI 호환 API(`/v1/chat/completions`)를 그대로 노출한다.
+- **배포 모드는 Knative가 아니라 Standard.** (구현 단계에서 바꿈) 클러스터 내부 전용이라 scale-to-zero · 카나리가 필요 없고, Knative는 init container를 기본으로 막으며(`kubernetes.podspec-init-containers`), 첫 기동(이미지 10 GB + 가중치 9 GB)이 `progress-deadline`을 넘기기 쉽다. Standard 모드는 Deployment + Service(`<이름>-predictor`)만 만든다.
 - **서빙 전용 NodePool을 따로 둔다.** 기존 `gpu` NodePool은 학습용(Spot 우선, 상한 1)이다. 서빙 파드가 거기에 올라가면 학습과 GPU를 다투고 Spot 회수 때 서비스가 끊긴다. `gpu-serving`은 온디맨드 `g6.xlarge`(L4, FP8 지원)로 고정하고 GPU 상한도 따로 1을 둔다. 실습 중 비용을 줄이려면 `llm_capacity_types = ["spot", "on-demand"]`로 바꿀 수 있다.
-- **가중치는 S3에 캐시한다.** 노드가 새로 뜰 때마다 Hugging Face에서 내려받지 않도록 `make llm-cache`가 클러스터 안의 Job으로 한 번 복사한다(HF → `s3://<bucket>/models/`). KServe storage-initializer는 Pod Identity로 S3를 읽는다.
-- **콜드 스타트에 대비한다.** 노드 기동(약 1분), vLLM 이미지 받기(약 10 GB), 가중치 로딩을 합치면 첫 Ready까지 5 ~ 10분 걸릴 것으로 본다. Knative `progress-deadline`을 30분으로 늘리고 `minReplicas: 1`로 scale-to-zero를 끈다.
+- **가중치는 S3에 캐시한다.** 노드가 새로 뜰 때마다 Hugging Face에서 내려받지 않도록 `make llm-cache`가 클러스터 안의 Job으로 한 번 복사한다(HF → `s3://<bucket>/models/`, 끝나면 `_COMPLETE.json`에 리비전 기록 → 같은 리비전은 건너뜀).
+- **서빙 파드는 init container(aws-cli)로 S3에서 받는다.** (구현 단계에서 바꿈) KServe storage-initializer는 KServe 웹훅이 나중에 끼워 넣는 컨테이너라 Pod Identity 자격 증명이 주입되는지 장담할 수 없다. 직접 정의한 init container는 파드 생성 시점에 있으므로 확실히 주입된다.
+- **init container는 UID 1337로 실행한다.** Kubeflow의 Istio CNI는 앱 init container의 트래픽도 사이드카로 돌리는데, 그 시점엔 사이드카가 아직 없어 S3에 닿지 못한다. istio-proxy UID(1337)는 가로채기에서 빠진다. emptyDir는 누구나 쓸 수 있어 권한 문제가 없다.
+- **NVIDIA device plugin을 서빙 노드에도 띄운다.** 기존 설정은 `node-role=gpu`에만 배치해서, `node-role=gpu-serving` 노드에는 `nvidia.com/gpu` 리소스가 생기지 않아 vLLM 파드가 영원히 Pending이 된다 → affinity를 `node-role In [gpu, gpu-serving]`으로 바꿈(`infra/terraform/k8s.tf`).
+- **콜드 스타트에 대비한다.** 노드 기동(약 1분), vLLM 이미지 받기(약 10 GB), 가중치 받기 · 로딩을 합치면 첫 Ready까지 5 ~ 10분 걸릴 것으로 본다. `startupProbe`로 20분까지 기다리고, `make llm`은 30분까지 Ready를 기다린다.
 - **임베딩은 rag-api 안에서 CPU로 돌린다.** 질의 1건 임베딩은 CPU로 충분하고, 색인 대상도 약 200 청크라 GPU가 필요 없다. 임베딩용 KServe를 따로 두지 않아 구성 요소가 하나 줄어든다.
 - **pgvector는 MLflow DB와 분리한다.** 이미지가 다르고(pgvector 확장), 색인을 다시 만들 때 MLflow에 영향을 주지 않기 위해서다.
 - **PDF를 원본으로 쓴다.** 외부 API 인증 · 호출 IP 등록이 필요 없고, 실습 결과가 같은 PDF에서 항상 재현된다. 대신 PDF 텍스트 정리(머리말 · 줄바꿈 · 시행 예정 조문 구분)를 직접 처리해야 하며, 이것이 RAG 데이터 준비 단계의 실습 포인트가 된다.
@@ -572,46 +580,57 @@ PDF의 SHA-256을 MLflow 실행 파라미터로 남겨, 어떤 원본으로 만�
 4. **원칙과 예외를 뒤집는 오류**(q02 · q11). 개선 후보: "원칙(금지/허용)을 먼저 쓰고 예외를 나열" 규칙.
 5. 로컬 4bit 모델 결과다. EKS의 `Qwen3-8B-FP8`(vLLM)과 비교 후보 `Qwen3.5-9B`로 같은 평가를 돌려 비교한다 — 생성 품질 기준(핵심 표현 포함률 하한)은 그 결과를 보고 정한다.
 
-### 10.7 인프라 · 플랫폼 변경
+### 10.7 인프라 · 플랫폼 변경 (구현됨, EKS 미검증)
 
 | 대상 | 변경 |
 |---|---|
 | `infra/terraform/variables.tf` | `enable_llm_serving`(기본 true), `llm_capacity_types`(기본 `["on-demand"]`), `llm_instance_types`(기본 `["g6.xlarge"]`), `llm_gpu_limit`(기본 1). 6주차 실습 때는 `cpu_node_count = 3` 권장 |
-| `infra/terraform/storage.tf` | ECR `mlops/rag`(파이프라인 · rag-api 공용 이미지) |
-| `infra/terraform/iam.tf` | Pod Identity: `kubeflow-user-example-com/law-llm` → S3 `models/*` 읽기, `kubeflow-user-example-com/default-editor`에 `models/*` 쓰기 추가(캐시 Job). `datasets/law/*`는 기존 `datasets/*` 권한으로 충분 |
-| `infra/terraform/outputs.tf` | `karpenter_nodepool_settings`에 llm 값 추가 |
-| `platform/karpenter/llm-nodepool.yaml.tmpl` (신규) | NodePool `gpu-serving`. 비면 5분 뒤 정리(`WhenEmpty`), `expireAfter: 720h` |
-| `platform/rag/` (신규) | `ragdb.yaml.tmpl`(네임스페이스 `rag` · StatefulSet · Service · Secret), `llm-cache-job.yaml.tmpl`, `llm-isvc.yaml.tmpl`, `rag-api.yaml.tmpl`(Deployment · Service · VirtualService `/rag/`), `authz.yaml.tmpl`(law-llm은 rag-api · default-editor principal만 허용), `install.sh` |
-| Knative 설정 | `progress-deadline` 30분 (InferenceService 주석으로 지정) |
-| `scripts/destroy.sh` | NodePool `gpu-serving` 삭제, `rag` 네임스페이스 PVC 삭제 추가 |
-| `images/rag/Dockerfile` (신규) | Python 3.12 + CPU torch 2.14.1 + sentence-transformers + pypdf + psycopg + openai + FastAPI + mlflow + kfp. bge-m3 가중치는 이미지에 넣지 않고 S3 캐시에서 받는다 |
+| `infra/terraform/storage.tf` | ECR `mlops/rag` |
+| `infra/terraform/iam.tf` | `rag_serving_pod_identity`: 프로필 네임스페이스의 `law-llm` · `rag-api` SA → S3 `models/*` 읽기. `pipeline_pod_identity`(default-editor)에 `models/*` 쓰기 추가(캐시 Job). `datasets/law/*`는 기존 `datasets/*` 권한으로 충분 |
+| `infra/terraform/k8s.tf` | NVIDIA device plugin 배치: `nodeSelector node-role=gpu` → affinity `node-role In [gpu, gpu-serving]` |
+| `infra/terraform/outputs.tf` | `karpenter_nodepool_settings`에 `llm_enabled` · `llm_capacity_types` · `llm_instance_types` · `llm_gpu_limit` |
+| `platform/karpenter/llm-nodepool.yaml.tmpl` · `apply.sh` | NodePool `gpu-serving`(`make infra`가 함께 적용). 비면 5분 뒤 정리, `expireAfter: 720h`. `enable_llm_serving = false`면 지움 |
+| `platform/rag/ragdb.yaml.tmpl` | 네임스페이스 `rag`: StatefulSet(pgvector, PVC 10Gi, 일반 노드) · Service. Secret `ragdb`는 install.sh가 `rag`와 프로필 네임스페이스에 같은 값으로 만든다 |
+| `platform/rag/model-cache-job.yaml.tmpl` | 캐시 Job(rag 이미지, `python -m lawrag.cache`, default-editor, 사이드카 없음, emptyDir 30Gi) |
+| `platform/rag/llm-isvc.yaml.tmpl` | SA `law-llm` · InferenceService `law-llm`(Standard, cluster-local, init container S3 받기, vLLM `--max-model-len=8192 --gpu-memory-utilization=0.90`, requests cpu 2 · 메모리 10Gi · GPU 1, `/dev/shm` 2Gi) · AuthorizationPolicy(rag-api principal만) |
+| `platform/rag/rag-api.yaml.tmpl` | SA `rag-api` · Deployment(일반 노드, init container로 bge-m3 받기, requests cpu 1 · 메모리 3Gi) · Service · VirtualService `/rag/` · AuthorizationPolicy(ingressgateway principal만) |
+| `platform/rag/index-job.yaml.tmpl` | 색인 Job(KFP 파이프라인 전 임시): S3 PDF → `lawrag.index load --gate-recall 0.8` → 기준 통과 시 승격 |
+| `platform/rag/install.sh` | `data` · `cache` · `platform` · `index` · `llm` · `llm-down` · `ask` · `status` |
+| `images/rag/Dockerfile` | Python 3.12 + CPU torch 2.14.1 + `requirements-rag.txt`. 로컬 arm64 빌드 2.7 GB, 컨테이너 안에서 파싱 · 검색 · rag-api 라우트 확인 |
+| `scripts/` | `env.sh`(rag 이미지 · vLLM · aws-cli · pgvector 이미지, 모델 이름, `model_slug`), `build-images.sh rag`, `destroy.sh`(`rag` 네임스페이스 삭제 — NodePool은 기존 코드가 모두 지움), `info.sh`(rag 주소, law-llm이 떠 있으면 경고) |
 | `docs/개인정보 보호법(법률)(제21445호)(20260911).pdf` | 저장소에 커밋(282 KB, 저작권 보호 대상 아님) |
 
-### 10.8 Makefile 타깃 (신규)
+**클러스터 없이 한 검증**: `terraform validate` · `fmt`, 템플릿 렌더링 → YAML 파싱 → InferenceService(Kubeflow 26.10.0의 KServe CRD) · NodePool(Karpenter v1.15.1 CRD) 스키마 검증(잘못된 값을 넣으면 거부되는 것도 확인), 템플릿 변수 ⊆ install.sh가 넘기는 변수(`test_platform_rag.py`), rag 이미지 로컬 빌드 · 실행.
+
+### 10.8 Makefile 타깃
+
+**EKS** (순서대로)
 
 | 타깃 | 내용 |
 |---|---|
+| `make images-rag` | rag 이미지 빌드(linux/amd64) · ECR 푸시 |
 | `make rag-data` | `PDF=`(기본: 위 PDF) → 1쪽에서 법률 번호 · 시행일을 읽어 `s3://<bucket>/datasets/law/<번호>-<시행일>/source.pdf` 업로드 |
-| `make rag-parse-local` | 로컬에서 PDF 파싱 · 청킹만 실행 → `data/law/chunks.jsonl` + 리포트 (클러스터 없이 확인) |
-| `make rag-platform` | ragdb + Secret + AuthorizationPolicy + rag-api 배포 |
-| `make llm-cache` | LLM · bge-m3 가중치 HF → S3 (한 번만, Job 완료 대기) |
-| `make llm` | InferenceService `law-llm` 배포 → GPU 노드 기동 → Ready 대기 (`LLM_MODEL=` 로 교체) |
-| `make llm-down` | InferenceService 삭제 → 5분 뒤 GPU 노드 정리 (**실습 후 꼭 실행**) |
-| `make rag-index` | 색인 파이프라인 제출 (`EVAL_GENERATION=true` 기본, LLM이 없으면 `false`) |
-| `make rag-ask Q="..."` | ALB 경유 질의, JSON 출력 |
-| `make rag-status` | 서비스 중 색인 버전, 청크 수, law-llm 상태, GPU 노드 |
+| `make llm-cache` | LLM · bge-m3 가중치 HF → S3 (캐시 Job 2개, 이미 있으면 건너뜀) |
+| `make rag-platform` | ragdb + Secret + rag-api + 접근 정책 |
+| `make rag-index-job` | 색인 Job (Recall@5 ≥ `GATE_RECALL`(0.8)이면 승격). KFP 파이프라인(`make rag-index`)이 생기면 대체 |
+| `make llm` | InferenceService `law-llm` 배포 → GPU 노드 기동 → Ready 대기(최대 30분) |
+| `make rag-ask Q="..."` | ALB 경유 질의(SA 토큰) + 토큰 없이 거부되는지 확인 |
+| `make rag-status` | ragdb · rag-api · law-llm · 캐시/색인 Job · GPU 서빙 노드 · 색인 버전 |
+| `make llm-down` | law-llm 삭제 → 5분 뒤 GPU 노드 정리 (**실습 후 꼭 실행**) |
 
-`.env.example`에 `LLM_MODEL=Qwen/Qwen3-8B-FP8`, `EMBED_MODEL=BAAI/bge-m3`, `RAGDB_IMAGE=pgvector/pgvector:0.8.6-pg17`, `VLLM_IMAGE=vllm/vllm-openai:v0.33.0` 추가.
+**로컬**: `rag-parse-local` · `rag-db-local` · `rag-index-local` · `rag-search-local` · `rag-eval-local` · `llm-local` · `rag-api-local` · `rag-gen-eval-local`
+
+`.env.example`에 `RAG_IMAGE_TAG` · `LLM_MODEL` · `EMBED_MODEL` · `VLLM_IMAGE` · `AWSCLI_IMAGE` · `RAGDB_IMAGE` (주석, 기본값은 `scripts/env.sh`).
 
 ### 10.9 디렉터리 (추가분)
 
 ```
 docs/               개인정보 보호법(법률)(제21445호)(20260911).pdf
 ml/src/lawrag/      pdfparse(추출 · 정리 · 조/부칙 분해 · 시행 상태), chunk(조 · 항 분할), embed, store(pgvector),
-                    retrieve, prompt, answer(생성 · 인용 검증), evaluate, eval/qa.jsonl
+                    retrieve, prompt, answer(생성 · 인용 검증), evaluate, cache(HF → S3), prepare · index(CLI), eval/qa.jsonl
 ml/rag_api/         app.py(FastAPI), static/index.html
 ml/tests/           test_lawrag_pdfparse(가짜 쪽 텍스트 경계 사례 + 실제 PDF로 조 수 · 시행 예정 9건 · 머리말 제거 확인),
-                    test_lawrag_chunk, test_lawrag_citation, test_lawrag_prompt (네트워크 · GPU 없이)
+                    test_lawrag_chunk · retrieve · evaluate · answer, test_platform_rag(템플릿) (네트워크 · GPU 없이)
 pipelines/          rag_index_pipeline.py, run_rag.py
 platform/rag/       10.7
 images/rag/         Dockerfile
@@ -620,7 +639,7 @@ images/rag/         Dockerfile
 ### 10.10 구현 순서와 검증 계획
 
 1. **로컬** — PDF 파싱 · 청킹 단위 테스트(`make rag-parse-local`), 로컬 Docker pgvector에 색인(`make rag-index-local`), 평가 세트 작성 · 검색 평가(`make rag-eval-local`), Apple Silicon mlx-lm으로 Qwen3-8B-4bit를 띄워(`make llm-local`) rag-api 전체 흐름 확인(`make rag-api-local`) · 생성 평가(`make rag-gen-eval-local`)
-2. **EKS 플랫폼** — `gpu-serving` NodePool, ragdb, `make rag-data`, `make llm-cache` → `make llm` (첫 Ready 시간, GPU 메모리, 초당 토큰 수 기록)
+2. **EKS 플랫폼** — `make infra`(gpu-serving NodePool) → `images-rag` → `rag-data` → `llm-cache` → `rag-platform` → `rag-index-job` → `llm` (첫 Ready 시간, GPU 메모리, 초당 토큰 수 기록) → 같은 평가 세트로 EKS 생성 평가(로컬 4bit와 비교)
 3. **파이프라인** — `make rag-index` 2회(두 번째는 KFP 캐시로 parse-pdf · embed 재사용 확인), 승격 · 미달 경로 모두 확인
 4. **질의** — `make rag-ask`, 브라우저 `/rag/`, MLflow 트레이스 확인, 토큰 없이 403
 5. **정리** — `make llm-down` 후 GPU 노드 0대, `make destroy` 잔존 자원 없음
@@ -642,7 +661,10 @@ images/rag/         Dockerfile
 |---|---|
 | GPU 서빙 노드를 켜 둔 채 방치 | `make llm-down` 안내를 README · `make info`에 표시. `make destroy`가 NodePool을 먼저 지움 |
 | vLLM 이미지의 CUDA와 AL2023 NVIDIA AMI 드라이버 불일치 | 구현 1단계에서 드라이버 버전 확인. 맞지 않으면 vLLM 직전 버전으로 낮춤 |
-| 첫 기동이 Knative 기한을 넘김 | `progress-deadline` 30분, 가중치 S3 캐시. 노드에 이미지가 남아 있으면 두 번째부터 빠름 |
+| 첫 기동이 오래 걸림 | Standard 모드라 Knative 기한 없음. `startupProbe` 20분, `make llm` 대기 30분, 가중치 S3 캐시. 노드에 이미지가 남아 있으면 두 번째부터 빠름 |
+| init container가 S3에 닿지 못함 (Istio CNI 가로채기) | UID 1337로 실행. 그래도 실패하면 Istio 네이티브 사이드카 여부 확인 후 `traffic.sidecar.istio.io/excludeOutboundPorts: "443"` 주석으로 대체 |
+| g6.xlarge 메모리(16GiB) 부족으로 vLLM 파드가 뜨지 않거나 OOM | requests 10Gi · limits 13Gi. 부족하면 `llm_instance_types = ["g6.2xlarge"]`(32GiB) |
+| Pod Identity 자격 증명이 init container에 없음 | 파드 생성 시 정의된 컨테이너에는 주입된다. 실패하면 `kubectl describe pod`로 `AWS_CONTAINER_CREDENTIALS_FULL_URI` 확인 |
 | FP8 모델의 한국어 품질 저하 | 평가 세트로 bf16(약 16 GB, `max-model-len` 8192로 제한)과 비교 |
 | Qwen3 thinking 출력(`<think>`)이 답변에 섞임 | `enable_thinking=false`, 응답 후처리에서 태그 제거 |
 | **현행 · 시행 예정 조문을 섞어 답함** | 청크에 상태 · 시행일 메타데이터와 머리말 표시, 프롬프트 규칙, 평가 세트에 시행 예정 질문 포함 |

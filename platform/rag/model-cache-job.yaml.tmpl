@@ -1,0 +1,55 @@
+# 모델 가중치 캐시 Job: Hugging Face → s3://<bucket>/models/<slug>/ (make llm-cache)
+#  - default-editor SA: Pod Identity로 S3 models/* 쓰기 (infra/terraform/iam.tf)
+#  - 사이드카 없음 (Job이 끝나도 istio-proxy가 남아 완료되지 않는 문제를 피함)
+#  - 받는 동안 파일을 노드 디스크(emptyDir)에 잠깐 둔다: LLM 약 9GB, bge-m3 약 2.3GB
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${CACHE_JOB}
+  namespace: ${KF_PROFILE_NS}
+  labels:
+    app: model-cache
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: model-cache
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: default-editor
+      restartPolicy: Never
+      nodeSelector:
+        node-role: cpu
+      containers:
+        - name: cache
+          image: ${IMAGE_RAG}
+          imagePullPolicy: Always
+          command: ["python", "-m", "lawrag.cache"]
+          args: ${CACHE_ARGS}
+          env:
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+            - name: AWS_DEFAULT_REGION
+              value: ${AWS_REGION}
+            - name: CACHE_TMP
+              value: /work
+            - name: HF_HUB_DISABLE_PROGRESS_BARS
+              value: "1"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 20Gi
+            limits:
+              memory: 2Gi
+              ephemeral-storage: 30Gi
+          volumeMounts:
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 30Gi

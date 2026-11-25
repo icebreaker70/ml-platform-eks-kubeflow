@@ -30,10 +30,14 @@ export GPU_FAMILIES="$(get gpu_families)"
 export GPU_LIMIT="$(get gpu_limit)"
 export BURST_CAPACITY_TYPES="$(get burst_capacity_types)"
 export BURST_CPU_LIMIT="$(get burst_cpu_limit)"
+export LLM_ENABLED="$(get llm_enabled)"
+export LLM_CAPACITY_TYPES="$(get llm_capacity_types)"
+export LLM_INSTANCE_TYPES="$(get llm_instance_types)"
+export LLM_GPU_LIMIT="$(get llm_gpu_limit)"
 [[ -n "${KARPENTER_NODE_ROLE}" ]] || die "karpenter_node_role_name output이 비어 있습니다 (make infra 확인)"
 
 # Spot을 처음 쓰는 계정에는 EC2 Spot 서비스 연결 역할이 없어 Spot 요청이 실패한다.
-if grep -q spot <<<"${GPU_CAPACITY_TYPES}${BURST_CAPACITY_TYPES}" \
+if grep -q spot <<<"${GPU_CAPACITY_TYPES}${BURST_CAPACITY_TYPES}${LLM_CAPACITY_TYPES}" \
    && ! aws iam get-role --role-name AWSServiceRoleForEC2Spot >/dev/null 2>&1; then
   log "EC2 Spot 서비스 연결 역할 생성 (계정에 한 번만 필요)"
   aws iam create-service-linked-role --aws-service-name spot.amazonaws.com >/dev/null \
@@ -54,6 +58,14 @@ if [[ "${BURST_CPU_LIMIT}" != "0" ]]; then
   envsubst "${VARS}" < "${DIR}/burst-nodepool.yaml.tmpl" | kubectl apply -f -
 else
   kubectl delete nodepools.karpenter.sh burst --ignore-not-found
+fi
+
+# python json.load가 true/false를 True/False로 출력한다
+if [[ "${LLM_ENABLED}" == "True" ]]; then
+  log "NodePool gpu-serving  (구매 방식 ${LLM_CAPACITY_TYPES}, 타입 ${LLM_INSTANCE_TYPES}, GPU 상한 ${LLM_GPU_LIMIT})"
+  envsubst '${LLM_CAPACITY_TYPES} ${LLM_INSTANCE_TYPES} ${LLM_GPU_LIMIT}' < "${DIR}/llm-nodepool.yaml.tmpl" | kubectl apply -f -
+else
+  kubectl delete nodepools.karpenter.sh gpu-serving --ignore-not-found
 fi
 
 kubectl get nodepools.karpenter.sh,ec2nodeclasses.karpenter.k8s.aws

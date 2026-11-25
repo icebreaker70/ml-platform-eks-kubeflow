@@ -1,0 +1,152 @@
+# 6주차 rag-api: 질문 → 검색(bge-m3 + pgvector) → law-llm(vLLM) → 인용 검증 → 응답
+#  - 외부: http://<ALB>/rag/  (Istio 게이트웨이 인증 — 브라우저는 Dex 로그인, 스크립트는 SA 토큰)
+#  - bge-m3 가중치: init container가 s3://<bucket>/models/bge-m3/ → /models/bge-m3 (make llm-cache)
+#  - 트레이스: MLflow 실험 law-rag
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rag-api
+  namespace: ${KF_PROFILE_NS}   # Pod Identity: S3 models/* 읽기
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-api
+  namespace: ${KF_PROFILE_NS}
+  labels:
+    app: rag-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rag-api
+  template:
+    metadata:
+      labels:
+        app: rag-api
+    spec:
+      serviceAccountName: rag-api
+      nodeSelector:
+        node-role: cpu           # 상시 서비스라 Spot(burst) 노드로 보내지 않는다
+      initContainers:
+        - name: fetch-embed-model
+          image: ${AWSCLI_IMAGE}
+          command: ["aws", "s3", "sync", "s3://${BUCKET}/models/${EMBED_SLUG}/", "/models/${EMBED_SLUG}/",
+                    "--no-progress", "--only-show-errors", "--exclude", "_COMPLETE.json"]
+          env:
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+            - name: AWS_DEFAULT_REGION
+              value: ${AWS_REGION}
+            - name: HOME
+              value: /tmp
+          securityContext:       # Istio CNI 가로채기에서 빠지도록 istio-proxy UID로 (llm-isvc.yaml.tmpl 참고)
+            runAsUser: 1337
+            runAsGroup: 1337
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      containers:
+        - name: rag-api
+          image: ${IMAGE_RAG}
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: RAGDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ragdb
+                  key: password
+            - name: RAGDB_DSN
+              value: postgresql://rag:$(RAGDB_PASSWORD)@ragdb.rag.svc.cluster.local:5432/rag
+            - name: EMBED_MODEL
+              value: /models/${EMBED_SLUG}
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: LLM_BASE_URL
+              value: http://law-llm-predictor.${KF_PROFILE_NS}.svc.cluster.local/v1
+            - name: LLM_MODEL
+              value: ${LLM_MODEL}
+            - name: LLM_TIMEOUT
+              value: "120"
+            - name: RAG_MIN_SCORE
+              value: "0.48"
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow.mlflow.svc.cluster.local:5000/mlflow
+            - name: MLFLOW_EXPERIMENT_NAME
+              value: law-rag
+            - name: OMP_NUM_THREADS
+              value: "2"
+          readinessProbe:
+            httpGet: { path: /rag/healthz, port: 8000 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests: { cpu: "1", memory: 3Gi }
+            limits: { memory: 4Gi }
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          emptyDir:
+            sizeLimit: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-api
+  namespace: ${KF_PROFILE_NS}
+spec:
+  selector:
+    app: rag-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: rag-api
+  namespace: ${KF_PROFILE_NS}
+spec:
+  gateways:
+    - kubeflow/kubeflow-gateway
+  hosts:
+    - "*"
+  http:
+    - match:
+        - uri:
+            prefix: /rag/
+        - uri:
+            exact: /rag
+      route:
+        - destination:
+            host: rag-api.${KF_PROFILE_NS}.svc.cluster.local
+            port:
+              number: 80
+      timeout: 300s
+---
+# 프로필 기본 정책은 네임스페이스 소유자(user@example.com) 요청만 허용한다.
+# 게이트웨이에서 인증(Dex 쿠키 또는 SA 토큰)을 통과한 요청이 rag-api에 닿도록 게이트웨이 출발만 허용한다.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-rag-api
+  namespace: ${KF_PROFILE_NS}
+spec:
+  action: ALLOW
+  selector:
+    matchLabels:
+      app: rag-api
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]

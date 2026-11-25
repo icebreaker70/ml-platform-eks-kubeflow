@@ -10,3 +10,6 @@ openai==3.49.0
 fastapi==0.162.4
 uvicorn==0.54.0
 mlflow==3.17.2
+# 가중치 캐시 Job(Hugging Face → S3), 색인 Job(S3의 PDF 읽기)
+boto3==1.44.2
+huggingface-hub==2.4.0
