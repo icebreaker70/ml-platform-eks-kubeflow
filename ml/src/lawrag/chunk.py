@@ -46,6 +46,10 @@ class Chunk:
         d["text"] = self.text
         return d
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Chunk":
+        return cls(**{k: v for k, v in d.items() if k != "text"})
+
 
 def _para_no(label: str) -> int:
     return CIRCLED.index(label) + 1

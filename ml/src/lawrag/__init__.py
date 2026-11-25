@@ -10,6 +10,8 @@ index    : 로컬 CLI — 색인 적재 · 승격 · 검색 · 버전 목록
 prompt   : 시스템 규칙 + 근거 조문 + 질문 → chat 메시지
 answer   : 질문 → 답변 (마스킹 → 검색 → LLM → 인용 검증 → 시행 예정 안내)
 evaluate : 평가 세트(eval/qa.jsonl)로 검색 평가 · 생성 평가(--generate)
+cache    : Hugging Face 모델 → S3 캐시, S3 → 로컬 받기
+steps    : 색인 파이프라인(pipelines/rag_index_pipeline.py) 단계별 로직
 
 rag-api(FastAPI)는 ml/rag_api/app.py.
 """

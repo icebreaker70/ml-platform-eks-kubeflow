@@ -74,6 +74,28 @@ def cache(repo: str, dest: str, revision: str | None = None, ignore: list[str] |
     return marker
 
 
+def download_prefix(src: str, local_dir: str) -> str:
+    """s3://버킷/경로/ 아래 파일을 local_dir로 받는다 (파이프라인 단계가 bge-m3를 받을 때). 반환: local_dir."""
+    import boto3
+
+    bucket, prefix = split_s3(src)
+    s3 = boto3.client("s3")
+    if read_marker(s3, bucket, prefix) is None:
+        raise FileNotFoundError(f"{src}에 캐시 완료 표시({MARKER})가 없습니다 — make llm-cache 먼저")
+    n = 0
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix + "/"):
+        for obj in page.get("Contents", []):
+            rel = obj["Key"][len(prefix) + 1:]
+            if not rel or rel == MARKER:
+                continue
+            path = os.path.join(local_dir, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            s3.download_file(bucket, obj["Key"], path)
+            n += 1
+    print(f"[cache] ↓ {src} → {local_dir} ({n}개)", flush=True)
+    return local_dir
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--repo", required=True)

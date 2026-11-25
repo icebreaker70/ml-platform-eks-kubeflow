@@ -510,22 +510,31 @@ POST /rag/ask {"question": "...", "index_version": (선택, 평가용)}
 - `GET /rag/`는 질문 입력과 근거 조문(원문 쪽 번호 포함) 펼쳐보기만 있는 단순 HTML 화면.
 - 스트리밍은 1차 범위에서 제외(Knative · Istio 경유 SSE는 구현 후 확인).
 
-### 10.6 색인 파이프라인 (`pipelines/rag_index_pipeline.py`)
+### 10.6 색인 파이프라인 (`pipelines/rag_index_pipeline.py`, 구현됨 · EKS 미검증)
 
 ```
-[parse-pdf] → [chunk] → [embed (CPU)] → [load-index] → [evaluate] ─┬─ 기준 통과 → [promote-index]
- S3 PDF →       조/항        bge-m3          새 index_version     │
- 조문 JSON                                                         └─ 미달: 종료 (서비스 중 색인 유지)
+[parse-pdf] → [chunk] → [embed] → [load-index] → [eval-retrieval] ─┬─ Recall@5 ≥ min_recall ─┬─ 생성 평가 켬: [eval-generation] ─┬─ 인용 정확도 ≥ 기준 → [promote]
+ S3 PDF        조/항     bge-m3     새 index_version                 │                         │                                   └─ 미달: 종료
+ (캐시)       (캐시)    (캐시)     (서비스 중 색인은 그대로)          │                         └─ 생성 평가 끔(NO_GEN=1): ──────────→ [promote]
+                                                                    └─ 미달: 종료 (서비스 중 색인 유지)
 ```
 
-| 컴포넌트 | 이미지 | 내용 |
+| 컴포넌트 | 자원 | 내용 (로직은 `lawrag/steps.py`) |
 |---|---|---|
-| parse-pdf | rag (신규) | 파라미터 `pdf_uri`(기본 `s3://<bucket>/datasets/law/21445-20260911/source.pdf`) → 조문 JSON 아티팩트 + 파싱 리포트(조 수, 시행 예정 조, 삭제 조, 제거한 머리말 수). **검사**: 조 번호가 빠짐없이 이어지는지, 중복이 시행 예정 표시로 모두 설명되는지 → 실패 시 중단 |
-| chunk | rag | 조 · 항 분할, 통계(청크 수, 길이 분포, 상태별 수) Markdown 리포트 |
-| embed | rag | bge-m3 CPU 임베딩. CPU 2코어 · 메모리 6Gi, `workload=batch` 허용(burst 노드 가능) |
-| load-index | rag | `index_version = <법률번호>-<시행일>-<실행 ID 앞 8자>`로 적재, HNSW 인덱스 생성 |
-| evaluate | rag | 평가 세트로 검색 지표 계산. `eval_generation=true`면 게이트웨이 경유 rag-api를 `index_version` 지정으로 호출해 생성 지표도 계산(4주차 smoke-test와 같은 SA 토큰 방식). 결과는 KFP Metrics + MLflow |
-| promote-index | rag | `active_index` 교체, MLflow 실행에 `promoted=true` 태그 |
+| parse-pdf | 0.5 CPU · 1Gi | `pdf_uri`(S3) → `articles.jsonl` + `law.json` 아티팩트, 파싱 리포트. 양식 검사 실패 시 중단. 반환: PDF SHA-256 |
+| chunk | 0.5 CPU · 1Gi | `max_chars`(1500) 기준 조 → 항 → 호 분할, 현행과 같은 시행 예정 청크 제거. 리포트(청크 수 · 길이 · 나뉜 조) |
+| embed | 2 CPU · 4 ~ 6Gi | S3 `models/bge-m3/`를 받아 CPU 임베딩 → `embeddings.npy` |
+| load-index | 0.5 CPU | `index_version = <법률번호>-<시행일>-<파이프라인 실행 ID 앞 8자>`로 적재. MLflow 실행 시작(params: PDF SHA-256, 법률 번호, 청크 수, 임베딩 모델) |
+| eval-retrieval | 1 CPU · 3 ~ 5Gi | 평가 세트 40문항 검색 평가 → KFP Metrics · 리포트 · `index_versions.metrics` · MLflow. 반환: Recall@5 ≥ `min_recall`(0.8) |
+| eval-generation | 0.5 CPU | 게이트웨이(`istio-ingressgateway`) 경유로 rag-api `/rag/ask`를 **`index_version` 지정**으로 호출 → 승격 전 색인으로 생성 평가. 파드 SA 토큰 사용(4주차 smoke-test와 같은 방식). 반환: 인용 정확도 ≥ `min_citation_accuracy`(0.9) |
+| promote | 0.5 CPU | `active_index` 교체 → rag-api가 다음 질의부터 새 색인 사용. MLflow 태그 `promoted=true`, `replaced=<이전 버전>` |
+
+- **캐시**: parse-pdf · chunk · embed는 KFP 캐시를 쓴다. 같은 PDF로 다시 돌리면 임베딩까지 건너뛰고 load-index부터 새로 한다. load-index 이후는 DB 상태를 바꾸므로 캐시하지 않는다.
+- **이미지**: 모든 단계가 rag 이미지 하나(`kfp==2.18.0` 포함 — `install_kfp_package=False`라 실행기가 이미지에 있어야 함). 모든 단계에 사이드카 없음 · `workload=batch` 허용(burst 노드), DB를 쓰는 다섯 단계에 Secret `ragdb` → `RAGDB_PASSWORD`.
+- **MLflow**: 실험 `law-rag-index`, 색인 버전마다 실행 하나(run name = 태그 `index_version`). 단계마다 같은 실행에 이어서 기록.
+- **생성 평가 전제**: law-llm이 Ready여야 한다. `make rag-index`는 Ready가 아니면 제출을 거부하고 `NO_GEN=1`(검색 평가만)을 권한다. 생성 평가의 승격 기준은 인용 정확도뿐이다 — 핵심 표현 포함률 · 리포트의 답변 원문은 사람이 보고 판단한다(아래 생성 평가 실측의 "발견 1").
+- **`make rag-index-job`과의 관계**: 같은 lawrag 코드를 Job 하나로 돌리는 간이판(검색 평가 기준만). 파이프라인을 쓸 수 없을 때를 위해 남긴다.
+- **클러스터 없이 한 검증**: 컴파일 · DAG 구조 테스트(조건 · 캐시 · Secret), KFP 로컬 실행기(`SubprocessRunner`)로 parse-pdf → chunk 아티팩트 전달(143청크), 로컬 pgvector로 `steps` 전 과정(parse → chunk → embed → load → eval-retrieval → promote → 원래 색인으로 복구), MLflow 기록(sqlite), rag 이미지 `pip check`.
 
 PDF의 SHA-256을 MLflow 실행 파라미터로 남겨, 어떤 원본으로 만든 색인인지 추적한다. 법이 개정되면 새 PDF를 `docs/`에 넣고 `make rag-data PDF=...` → `make rag-index`.
 
@@ -612,8 +621,10 @@ PDF의 SHA-256을 MLflow 실행 파라미터로 남겨, 어떤 원본으로 만�
 | `make rag-data` | `PDF=`(기본: 위 PDF) → 1쪽에서 법률 번호 · 시행일을 읽어 `s3://<bucket>/datasets/law/<번호>-<시행일>/source.pdf` 업로드 |
 | `make llm-cache` | LLM · bge-m3 가중치 HF → S3 (캐시 Job 2개, 이미 있으면 건너뜀) |
 | `make rag-platform` | ragdb + Secret + rag-api + 접근 정책 |
-| `make rag-index-job` | 색인 Job (Recall@5 ≥ `GATE_RECALL`(0.8)이면 승격). KFP 파이프라인(`make rag-index`)이 생기면 대체 |
-| `make llm` | InferenceService `law-llm` 배포 → GPU 노드 기동 → Ready 대기(최대 30분) |
+| `make rag-index` | 색인 KFP 파이프라인 제출(10.6). 생성 평가에 `make llm` 필요, 검색 평가만: `NO_GEN=1`, 기준: `MIN_RECALL=0.8` |
+| `make rag-index-job` | 파이프라인 없이 Job 하나로 색인 (Recall@5 ≥ `GATE_RECALL`(0.8)이면 승격) |
+| `make rag-compile` | 파이프라인 컴파일만 |
+| `make llm` | InferenceService `law-llm` 배포 → GPU 노드 기동 → Ready 대기(최대 30분). 생성 평가가 있는 `make rag-index` 전에 |
 | `make rag-ask Q="..."` | ALB 경유 질의(SA 토큰) + 토큰 없이 거부되는지 확인 |
 | `make rag-status` | ragdb · rag-api · law-llm · 캐시/색인 Job · GPU 서빙 노드 · 색인 버전 |
 | `make llm-down` | law-llm 삭제 → 5분 뒤 GPU 노드 정리 (**실습 후 꼭 실행**) |
@@ -627,10 +638,11 @@ PDF의 SHA-256을 MLflow 실행 파라미터로 남겨, 어떤 원본으로 만�
 ```
 docs/               개인정보 보호법(법률)(제21445호)(20260911).pdf
 ml/src/lawrag/      pdfparse(추출 · 정리 · 조/부칙 분해 · 시행 상태), chunk(조 · 항 분할), embed, store(pgvector),
-                    retrieve, prompt, answer(생성 · 인용 검증), evaluate, cache(HF → S3), prepare · index(CLI), eval/qa.jsonl
+                    retrieve, prompt, answer(생성 · 인용 검증), evaluate, cache(HF → S3), steps(파이프라인 단계),
+                    prepare · index(CLI), eval/qa.jsonl
 ml/rag_api/         app.py(FastAPI), static/index.html
 ml/tests/           test_lawrag_pdfparse(가짜 쪽 텍스트 경계 사례 + 실제 PDF로 조 수 · 시행 예정 9건 · 머리말 제거 확인),
-                    test_lawrag_chunk · retrieve · evaluate · answer, test_platform_rag(템플릿) (네트워크 · GPU 없이)
+                    test_lawrag_chunk · retrieve · evaluate · answer · steps(파이프라인 컴파일 · DAG 포함), test_platform_rag(템플릿)
 pipelines/          rag_index_pipeline.py, run_rag.py
 platform/rag/       10.7
 images/rag/         Dockerfile
@@ -640,7 +652,7 @@ images/rag/         Dockerfile
 
 1. **로컬** — PDF 파싱 · 청킹 단위 테스트(`make rag-parse-local`), 로컬 Docker pgvector에 색인(`make rag-index-local`), 평가 세트 작성 · 검색 평가(`make rag-eval-local`), Apple Silicon mlx-lm으로 Qwen3-8B-4bit를 띄워(`make llm-local`) rag-api 전체 흐름 확인(`make rag-api-local`) · 생성 평가(`make rag-gen-eval-local`)
 2. **EKS 플랫폼** — `make infra`(gpu-serving NodePool) → `images-rag` → `rag-data` → `llm-cache` → `rag-platform` → `rag-index-job` → `llm` (첫 Ready 시간, GPU 메모리, 초당 토큰 수 기록) → 같은 평가 세트로 EKS 생성 평가(로컬 4bit와 비교)
-3. **파이프라인** — `make rag-index` 2회(두 번째는 KFP 캐시로 parse-pdf · embed 재사용 확인), 승격 · 미달 경로 모두 확인
+3. **파이프라인** — `make rag-index NO_GEN=1`(첫 색인) → `make llm` 후 `make rag-index`(생성 평가 포함, KFP 캐시로 parse-pdf · chunk · embed 재사용 확인) → `MIN_RECALL=0.99`로 미달 경로 확인(서비스 중 색인 유지)
 4. **질의** — `make rag-ask`, 브라우저 `/rag/`, MLflow 트레이스 확인, 토큰 없이 403
 5. **정리** — `make llm-down` 후 GPU 노드 0대, `make destroy` 잔존 자원 없음
 

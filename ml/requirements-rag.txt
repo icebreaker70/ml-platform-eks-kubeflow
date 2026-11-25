@@ -13,3 +13,5 @@ mlflow==3.17.2
 # 가중치 캐시 Job(Hugging Face → S3), 색인 Job(S3의 PDF 읽기)
 boto3==1.44.2
 huggingface-hub==2.4.0
+# 색인 파이프라인 컴포넌트 실행기 (install_kfp_package=False라 이미지에 있어야 함, 백엔드와 같은 버전)
+kfp==2.18.0

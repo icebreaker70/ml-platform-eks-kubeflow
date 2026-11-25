@@ -8,7 +8,7 @@ ENV := source scripts/env.sh
         movierec-local tensorboard movierec tb tb-delete tb-status nodes \
         rag-parse-local rag-db-local rag-index-local rag-search-local rag-eval-local \
         llm-local rag-gen-eval-local rag-api-local \
-        images-rag rag-data llm-cache rag-platform rag-index-job llm llm-down rag-ask rag-status
+        images-rag rag-data llm-cache rag-platform rag-index-job rag-index rag-compile llm llm-down rag-ask rag-status
 
 help: ## 명령 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -142,8 +142,15 @@ llm-cache: ## LLM · bge-m3 가중치 Hugging Face → S3 models/ (클러스터 
 rag-platform: ## ragdb(pgvector) + rag-api + 접근 정책 (make llm-cache 이후)
 	bash platform/rag/install.sh platform
 
-rag-index-job: ## 색인 Job: PDF → 임베딩 → ragdb → 검색 평가 → Recall@5 ≥ GATE_RECALL(0.8)이면 승격
+rag-index-job: ## 색인 Job(파이프라인 없이 한 번에): PDF → 임베딩 → ragdb → 검색 평가 → Recall@5 ≥ GATE_RECALL이면 승격
 	bash platform/rag/install.sh index
+
+rag-index: ## 색인 KFP 파이프라인 제출 (생성 평가에 make llm 필요, 검색 평가만: NO_GEN=1)
+	$(ENV) && .venv/bin/python pipelines/run_rag.py --host "http://$$(alb_host)/pipeline" \
+	  --min-recall $${MIN_RECALL:-0.8} $${NO_GEN:+--no-generation}
+
+rag-compile: ## 색인 파이프라인 컴파일만 (pipelines/rag_index_pipeline.yaml)
+	$(ENV) && .venv/bin/python pipelines/run_rag.py --compile-only
 
 llm: ## law-llm(vLLM, Qwen3-8B-FP8) 배포 → GPU 노드(g6.xlarge 온디맨드) 기동 → Ready 대기
 	bash platform/rag/install.sh llm

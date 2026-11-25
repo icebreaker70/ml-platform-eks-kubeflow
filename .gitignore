@@ -45,6 +45,7 @@ data/
 # 컴파일 결과(ECR 계정 ID 포함) — make compile / make pipeline이 다시 만든다
 pipelines/idcard_pipeline.yaml
 pipelines/movierec_pipeline.yaml
+pipelines/rag_index_pipeline.yaml
 # 로컬 TensorBoard 로그 (make movierec-local)
 runs/
 *.log

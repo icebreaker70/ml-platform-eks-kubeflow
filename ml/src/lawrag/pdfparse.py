@@ -100,6 +100,13 @@ class Article:
         d["key"], d["label"] = self.key, self.label
         return d
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Article":
+        """to_dict()의 역 (파이프라인 단계 사이에 JSONL로 넘길 때)."""
+        d = {k: v for k, v in d.items() if k not in ("key", "label")}
+        d["units"] = [Unit(**u) for u in d.get("units", [])]
+        return cls(**d)
+
 
 @dataclass
 class ParsedLaw:
