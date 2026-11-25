@@ -6,7 +6,8 @@ ENV := source scripts/env.sh
 .PHONY: help check-tools venv test local-demo infra kubeconfig images kubeflow ingress mlflow extras \
         platform compile pipeline info test-infer destroy \
         movierec-local tensorboard movierec tb tb-delete tb-status nodes \
-        rag-parse-local rag-db-local rag-index-local rag-search-local rag-eval-local
+        rag-parse-local rag-db-local rag-index-local rag-search-local rag-eval-local \
+        llm-local rag-gen-eval-local rag-api-local
 
 help: ## 명령 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -50,6 +51,21 @@ rag-search-local: ## 로컬 색인 검색 (Q="질문" K=5)
 
 rag-eval-local: ## 평가 세트로 로컬 색인 검색 평가 → data/law/eval_report.md, 지표를 색인 버전에 기록
 	$(LAWRAG).evaluate -k $${K:-5} --save
+
+# 로컬 LLM: Apple Silicon용 mlx-lm 서버 (OpenAI 호환 API — EKS의 vLLM과 같은 호출 방식)
+MLX_LM_VERSION ?= 0.32.2
+MLX_VERSION ?= 0.32.4
+LOCAL_LLM_MODEL ?= mlx-community/Qwen3-8B-4bit
+
+llm-local: ## 로컬 LLM 서버 (127.0.0.1:18080, Apple Silicon). 첫 실행 시 모델 약 4.6GB 내려받음
+	uvx --from "mlx-lm==$(MLX_LM_VERSION)" --with "mlx==$(MLX_VERSION)" mlx_lm.server \
+	  --model $(LOCAL_LLM_MODEL) --host 127.0.0.1 --port 18080
+
+rag-gen-eval-local: ## 생성 평가 (make llm-local 필요) → data/law/eval_generation.md (ONLY=q01,u04 로 일부만)
+	LLM_MODEL=$(LOCAL_LLM_MODEL) $(LAWRAG).evaluate -k $${K:-5} --generate --save $${ONLY:+--only $$ONLY}
+
+rag-api-local: ## rag-api 로컬 실행 → http://127.0.0.1:18000/rag/ (make rag-db-local · llm-local 필요)
+	LLM_MODEL=$(LOCAL_LLM_MODEL) PYTHONPATH=ml/src:ml .venv/bin/uvicorn rag_api.app:app --host 127.0.0.1 --port 18000
 
 # ---------------------------------------------------------------- AWS ----
 infra: ## Terraform: VPC, EKS(1.36), 노드그룹, S3, ECR, IAM, ALB 컨트롤러, NVIDIA 플러그인

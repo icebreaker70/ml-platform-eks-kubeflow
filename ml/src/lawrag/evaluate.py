@@ -134,6 +134,57 @@ def report_markdown(index_version: str, results: list[Result], m: dict, k: int) 
     return "\n".join(lines) + "\n"
 
 
+# ── 생성 평가 ─────────────────────────────────────────────────────────────
+def _norm(s: str) -> str:
+    """핵심 표현 비교용: 공백 제거, 가운뎃점 통일(법령 'ㆍ' ↔ 모델 '·')."""
+    import re
+    return re.sub(r"\s+", "", s).replace("·", "ㆍ").replace("・", "ㆍ")
+
+
+def points_coverage(qa: QA, answer: str) -> float:
+    if not qa.points:
+        return 1.0
+    a = _norm(answer)
+    return sum(_norm(p) in a for p in qa.points) / len(qa.points)
+
+
+def gen_metrics(pairs: list[tuple[QA, "object"]]) -> dict:
+    """pairs: (QA, answer.Answer). 답변 텍스트는 사람이 리포트로 함께 본다 — 숫자는 경향을 보는 용도."""
+    ans = [(q, a) for q, a in pairs if q.answerable]
+    unans = [(q, a) for q, a in pairs if not q.answerable]
+    answered = [(q, a) for q, a in ans if not a.refused]
+    cites = [c for _, a in answered for c in a.citations]
+    fut = [(q, a) for q, a in ans if q.expect_status == "시행예정"]
+    gen = [a.timings.get("generate_s", 0) for _, a in pairs if not a.skipped_llm]
+    return {
+        "refusal_accuracy": round(sum(a.refused for _, a in unans) / len(unans), 4) if unans else None,
+        "false_refusal_rate": round(sum(a.refused for _, a in ans) / len(ans), 4),
+        "citation_accuracy": round(sum(c.status != "unsupported" for c in cites) / len(cites), 4) if cites else None,
+        "expected_cited_rate": round(sum(bool(set(q.expected) & {c.key for c in a.citations})
+                                         for q, a in answered) / len(answered), 4) if answered else None,
+        "no_citation_rate": round(sum(not a.citations for _, a in answered) / len(answered), 4) if answered else None,
+        "points_coverage": round(sum(points_coverage(q, a.answer) for q, a in answered) / len(answered), 4)
+        if answered else None,
+        "future_date_rate": round(sum("2027" in a.answer for _, a in fut) / len(fut), 4) if fut else None,
+        "future_notice_added": sum(a.future_notice_added for _, a in pairs),
+        "llm_skipped": sum(a.skipped_llm for _, a in pairs),
+        "generate_s_avg": round(sum(gen) / len(gen), 1) if gen else None,
+    }
+
+
+def gen_report_markdown(index_version: str, model: str, pairs: list, m: dict) -> str:
+    lines = [f"# 생성 평가 — {index_version} · {model}", "", "| 지표 | 값 |", "|---|---|"]
+    lines += [f"| {k} | {v} |" for k, v in m.items()]
+    lines.append("")
+    for q, a in pairs:
+        cites = ", ".join(f"{c.key}{'' if c.status == 'retrieved' else '(' + c.status + ')'}" for c in a.citations)
+        flag = "거절" if a.refused else f"인용 [{cites or '없음'}]"
+        lines += [f"## {q.id} ({q.type}) — 정답 {', '.join(q.expected) or '없음'} · {flag} · "
+                  f"핵심 표현 {points_coverage(q, a.answer):.0%} · {a.timings.get('generate_s', 0)}초",
+                  "", f"**Q.** {q.question}", "", a.answer, ""]
+    return "\n".join(lines) + "\n"
+
+
 def run(qas: list[QA], embed_query, backend, index_version: str, k: int = 5) -> list[Result]:
     from .retrieve import retrieve
     return [Result(q, retrieve(q.question, embed_query, backend, index_version, k=k)) for q in qas]
@@ -152,6 +203,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--model", default=None)
     p.add_argument("--out", default="data/law/eval_report.md")
     p.add_argument("--save", action="store_true", help="index_versions.metrics에 기록")
+    p.add_argument("--generate", action="store_true", help="LLM 답변까지 생성해 생성 지표를 잰다 (LLM_BASE_URL)")
+    p.add_argument("--gen-out", default="data/law/eval_generation.md")
+    p.add_argument("--only", default=None, help="쉼표로 구분한 문항 id만 (예: q01,u04)")
     args = p.parse_args(argv)
 
     conn = store.connect(args.dsn)
@@ -159,15 +213,38 @@ def main(argv: list[str] | None = None) -> None:
     if not version:
         raise SystemExit("서비스 중인 색인이 없습니다")
     emb = Embedder(args.model)
-    results = run(load_qa(args.qa), emb.encode_query, PgBackend(conn), version, args.k)
+    qas = load_qa(args.qa)
+    if args.only:
+        qas = [q for q in qas if q.id in set(args.only.split(","))]
+    backend = PgBackend(conn)
+    results = run(qas, emb.encode_query, backend, version, args.k)
     m = metrics(results, args.k)
     report = report_markdown(version, results, m, args.k)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(report)
     print(report)
+    saved = {"retrieval": m}
+
+    if args.generate:
+        from .answer import LLM, ask
+
+        llm = LLM()
+        pairs = []
+        for q in qas:
+            a = ask(q.question, emb.encode_query, backend, version, llm, k=args.k)
+            pairs.append((q, a))
+            print(f"{q.id}: {'거절' if a.refused else [c.key for c in a.citations]} ({a.timings.get('generate_s')}초)",
+                  flush=True)
+        gm = gen_metrics(pairs)
+        with open(args.gen_out, "w", encoding="utf-8") as f:
+            f.write(gen_report_markdown(version, llm.model, pairs, gm))
+        print("\n".join(f"{k}: {v}" for k, v in gm.items()))
+        print(f"→ {args.gen_out}")
+        saved["generation"] = {**gm, "model": llm.model}
+
     if args.save:
-        store.set_metrics(conn, version, {"retrieval": m})
+        store.set_metrics(conn, version, saved)
         print(f"→ index_versions.metrics 기록: {version}")
 
 
