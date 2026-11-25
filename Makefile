@@ -6,7 +6,7 @@ ENV := source scripts/env.sh
 .PHONY: help check-tools venv test local-demo infra kubeconfig images kubeflow ingress mlflow extras \
         platform compile pipeline info test-infer destroy \
         movierec-local tensorboard movierec tb tb-delete tb-status nodes \
-        rag-parse-local rag-db-local rag-index-local rag-search-local
+        rag-parse-local rag-db-local rag-index-local rag-search-local rag-eval-local
 
 help: ## 명령 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -47,6 +47,9 @@ rag-index-local: rag-db-local ## PDF → bge-m3 임베딩(CPU) → 로컬 pgvect
 
 rag-search-local: ## 로컬 색인 검색 (Q="질문" K=5)
 	$(LAWRAG).index search "$(Q)" -k $${K:-5}
+
+rag-eval-local: ## 평가 세트로 로컬 색인 검색 평가 → data/law/eval_report.md, 지표를 색인 버전에 기록
+	$(LAWRAG).evaluate -k $${K:-5} --save
 
 # ---------------------------------------------------------------- AWS ----
 infra: ## Terraform: VPC, EKS(1.36), 노드그룹, S3, ECR, IAM, ALB 컨트롤러, NVIDIA 플러그인

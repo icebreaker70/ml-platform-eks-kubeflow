@@ -7,4 +7,5 @@ store    : pgvector 저장소 (색인 버전 · 승격 · 검색)
 retrieve : 질문 → 근거 청크 top-k (조문 번호 직접 매칭 + 벡터 검색)
 prepare  : 로컬 CLI — PDF → articles.jsonl, chunks.jsonl, report.md
 index    : 로컬 CLI — 색인 적재 · 승격 · 검색 · 버전 목록
+evaluate : 평가 세트(eval/qa.jsonl)로 검색 평가 (Recall@k · MRR@k · 답 없음 기준값)
 """
