@@ -13,5 +13,7 @@ faker==40.54.0
 pillow==13.0.0
 numpy==2.5.4
 tensorboard==2.21.0
+# lawrag(6주차) PDF 파싱 — 7.1.x는 출시 2주 미만이라 7.0.1로 고정 (2026-11-25)
+pypdf==7.0.1
 requests
 pytest

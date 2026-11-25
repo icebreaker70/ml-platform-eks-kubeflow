@@ -5,7 +5,8 @@ ENV := source scripts/env.sh
 
 .PHONY: help check-tools venv test local-demo infra kubeconfig images kubeflow ingress mlflow extras \
         platform compile pipeline info test-infer destroy \
-        movierec-local tensorboard movierec tb tb-delete tb-status nodes
+        movierec-local tensorboard movierec tb tb-delete tb-status nodes \
+        rag-parse-local
 
 help: ## 명령 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -25,6 +26,12 @@ local-demo: ## 로컬에서 소량 데이터 생성 → 1 epoch 학습 (CPU)
 	PYTHONPATH=ml/src .venv/bin/python -m idcard.datagen --out data/val --n 20 --seed 2
 	MLFLOW_TRACKING_URI=sqlite:///mlflow.db PYTHONPATH=ml/src .venv/bin/python -m idcard.train \
 	  --train-dir data/train --val-dir data/val --epochs 1 --batch-size 4 --num-workers 0
+
+# ------------------------------------------------- LLM RAG (6주차, 로컬) ----
+LAW_PDF ?= docs/개인정보 보호법(법률)(제21445호)(20260911).pdf
+
+rag-parse-local: ## 법률 PDF 파싱 · 청킹 → data/law/{articles,chunks}.jsonl + report.md (PDF="..." 로 교체)
+	PYTHONPATH=ml/src .venv/bin/python -m lawrag.prepare --pdf "$${PDF:-$(LAW_PDF)}" --out data/law
 
 # ---------------------------------------------------------------- AWS ----
 infra: ## Terraform: VPC, EKS(1.36), 노드그룹, S3, ECR, IAM, ALB 컨트롤러, NVIDIA 플러그인
