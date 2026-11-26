@@ -231,6 +231,8 @@ parse-pdf → chunk → embed → load-index → eval-retrieval ─┬ Recall@5 
 | law-llm 자원 | CUDA 드라이버 580.178.04 + torch cu130 호환, GPU 메모리 19.5 / 23GiB(가중치 8.9 · KV 캐시 9.06GiB = 65,968토큰, 8K 요청 동시 8개) |
 | `make rag-ask` | 200 OK, 약 3초(검색 0.16 + 생성 2.7초). 첫 질의만 12초(검색 초기화 8.4초). 토큰 없이 403 |
 | `make rag-index` (생성 평가) | 6분 21초 — parse · chunk · embed **KFP 캐시 0초**, 생성 평가 40문항 3분 21초 → 새 색인 승격 · 이전 색인 교체 |
+| `make llm-down` → `make destroy` | GPU 노드: 비고 5분 뒤 삭제 결정, EC2 종료 요청까지 5분 23초. destroy 13분 29초 · 114개 삭제, 잔존 자원 없음(직접 조회) |
+| 비용 (추정) | 클러스터 약 2시간 50분 · GPU 약 42분 → 약 2.7달러 (단가 합산, 실제 청구액 아님) |
 | 생성 평가 (FP8) | 인용 1.0 · 거절 1.0 · 정답 조 인용 0.944 · 핵심 표현 0.628 · 직접 판정 **정확 26 · 부분 5 · 오답 5** (로컬 4bit 23 · 6 · 7) |
 
 평가 세트 밖의 질문 3개도 `make rag-ask`로 확인했습니다(EKS 실측).
@@ -401,7 +403,8 @@ kubectl -n kubeflow-user-example-com get isvc idcard-recognizer   # 두 번째 �
 
 - **6주차 — 로컬에서 확인 (2026-11-25 ~ 26)**: PDF 파싱 · 청킹(143청크), bge-m3 + pgvector 색인 · 검색, 검색 평가(Recall@5 0.972), mlx-lm(Qwen3-8B-4bit)으로 rag-api 전체 흐름과 40문항 생성 평가 + 답변 직접 판정, rag 이미지 빌드(arm64) · 컨테이너 안 실행, 색인 파이프라인 컴파일 · KFP 로컬 실행기(parse → chunk) · 로컬 DB로 전 단계(적재 → 평가 → 승격 → 복구), 테스트 82개 + DB 통합 2개.
 - **6주차 — EKS에서 확인 (2026-11-26 ~ 27)**: `make infra`부터 `make rag-index`(생성 평가 포함)까지 전 단계 — 가중치 캐시, ragdb · rag-api, 색인 파이프라인 2회(KFP 캐시 · 승격 · 교체), law-llm 기동(CUDA 드라이버 · 메모리 · S3 접근 · Standard 모드), ALB 경유 질의와 인증 거부(403), FP8 생성 평가와 답변 직접 판정. 실행 중 고친 것 5건.
-- **6주차 — 아직 확인하지 않은 것**: law-llm AuthorizationPolicy의 거부 동작(rag-api 외 호출), 브라우저 질의 화면(`/rag/`), Spot 서빙 노드, 프롬프트 개선 후 재평가, `make llm-down` · `make destroy` 후 잔존 자원.
+- **6주차 — 정리 (2026-11-27)**: `make llm-down` → 빈 GPU 노드는 약 5분 뒤 Karpenter가 삭제(EC2 종료 요청까지 5분 23초). `make destroy` 13분 29초, Terraform 리소스 114개 삭제. 직접 조회로 EKS · VPC · ALB · NAT · EC2 · EBS · S3 · ECR 잔존 없음 확인(남는 것은 과금 없는 EC2 instant Fleet 기록과 삭제 대기 중인 KMS 키).
+- **6주차 — 아직 확인하지 않은 것**: law-llm AuthorizationPolicy의 거부 동작(rag-api 외 호출), 브라우저 질의 화면(`/rag/`), Spot 서빙 노드, 프롬프트 개선 후 재평가.
 - **5주차 — EKS에서 확인** (2026-11-16): Karpenter(GPU Spot · 임시 노드 기동과 회수), `make tensorboard`, `make movierec`, `make tb` 인스턴스 접속, `make destroy`.
 - **4주차 — EKS에서 확인** (2026-11-13 ~ 16): 신분증 파이프라인 20/20, ALB 경유 추론.
 - 비용은 단가를 더한 추정이고 실제 청구액이 아닙니다.

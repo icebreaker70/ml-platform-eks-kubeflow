@@ -364,7 +364,18 @@ EKS에서 고친 문제 17건(Istio 웹훅 포트, MLflow OOM · CORS · 리전,
 
 ③ · ④는 오프라인 검증(CRD 스키마)으로 잡을 수 없는 종류였다 — ④는 컨트롤러가 기본값을 채운 뒤에, ③은 빈 DB에서 띄워야 드러난다.
 
-**아직 확인하지 않은 것**: law-llm AuthorizationPolicy의 거부 동작(rag-api 외 호출), 브라우저 질의 화면, Spot 서빙 노드, `make llm-down` · `make destroy` 후 잔존 자원.
+**정리 (2026-11-27)**
+
+| 시각 | 단계 | 결과 |
+|---|---|---|
+| 00:18:12 | `make llm-down` | law-llm 삭제, 파드 1분 안에 정리 |
+| 00:23:29 · 00:23:35 | Karpenter 빈 노드 삭제 결정 · EC2 종료 요청 | 빈 뒤 약 5분(`consolidateAfter: 5m`). NodeClaim은 00:30에 마무리 |
+| 00:28:58 ~ 00:42:27 | `make destroy` | 13분 29초, Terraform 리소스 114개 삭제(5주차 108개 + 6주차 추가분). 가장 오래 걸린 것: 일반 노드그룹 약 8분 |
+| 이후 | 직접 조회 | EKS · VPC · ALB · NAT · EC2 · EBS · S3 · ECR 잔존 없음. EC2 instant Fleet 기록(과금 없음)과 KMS 키(`PendingDeletion`)만 남음 — 태그 조회 API는 삭제된 자원을 한동안 보여 주므로 자원별 조회로 확인 |
+
+비용(추정): 클러스터 21:51 ~ 00:42 약 2시간 50분(시간당 약 0.7) + GPU 서빙 23:41 ~ 00:23 약 42분(시간당 약 1.0) → **약 2.7달러**. 단가 합산이며 실제 청구액이 아니다.
+
+**아직 확인하지 않은 것**: law-llm AuthorizationPolicy의 거부 동작(rag-api 외 호출), 브라우저 질의 화면, Spot 서빙 노드, 프롬프트 개선 후 재평가.
 
 ## 8. 비용 (서울, 대략)
 
@@ -688,7 +699,7 @@ images/rag/         Dockerfile
 2. **EKS 플랫폼** — `make infra`(gpu-serving NodePool) → `images-rag` → `rag-data` → `llm-cache` → `rag-platform` → `llm` — **완료(7.4절)**: 첫 Ready 약 11분, GPU 메모리 19.5 / 23 GiB, 짧은 요청 41토큰 1.4초. EKS 생성 평가(FP8)는 로컬 4bit보다 정확 23 → 26, 오답 7 → 5
 3. **파이프라인** — `make rag-index NO_GEN=1`(첫 색인, 7분) → `make llm` 후 `make rag-index`(생성 평가 포함, 6분 21초, KFP 캐시로 parse · chunk · embed 0초) — **완료**. 미달 경로(`MIN_RECALL=0.99`)는 EKS에서 아직 확인하지 않음(로컬 · DAG 테스트로만)
 4. **질의** — `make rag-ask` 200 OK(약 3초, 첫 질의 12초), MLflow 트레이스, 토큰 없이 403 — **완료**. 브라우저 `/rag/` 화면은 아직 확인하지 않음
-5. **정리** — `make llm-down` 후 GPU 노드 0대, `make destroy` 잔존 자원 없음
+5. **정리** — `make llm-down` 후 GPU 노드 0대(종료 요청까지 5분 23초), `make destroy` 13분 29초 · 114개 삭제 · 잔존 자원 없음 — **완료(7.4절)**
 
 기록할 값: 첫 Ready까지 시간, 질의 지연(검색 / 생성 분리), Recall@5 · 인용 정확도, 시간당 비용.
 
