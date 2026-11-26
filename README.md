@@ -9,9 +9,8 @@ LLM은 EKS의 GPU 노드에서 **KServe + vLLM으로 직접 서빙**하고, 색�
 - 시리즈: [Machine Learning Platform Engineering](https://velog.io/@sejkim/series/Machine-Learning-Platform-Engineering)
 - 설계 · 버전 선택 근거 · 실측 기록: [PLAN.md](PLAN.md) 10장
 
-> **진행 상태 (2026-11-26)** — 로컬(파싱 · 색인 · 검색 평가 · LLM 생성 · 생성 평가)은 실행해서 확인했습니다.
-> EKS 배포(GPU 서빙 · rag-api · 색인 파이프라인)는 **코드와 매니페스트만 준비했고 아직 클러스터에서 실행하지 않았습니다.**
-> 클러스터 없이 할 수 있는 검증(Terraform validate, CRD 스키마 검증, 파이프라인 컴파일, 이미지 빌드)만 거쳤습니다 — [검증 범위](#검증-범위).
+> **진행 상태 (2026-11-27)** — 로컬(2026-11-25 ~ 26)과 **EKS(2026-11-26 ~ 27) 모두 처음부터 끝까지 실행해서 확인했습니다.**
+> EKS에서 처음 실행하며 고친 것 5건과 실측값은 [2.5 EKS 실측](#25-eks-실측-2026-11-26--27)과 PLAN.md 7.4 · 10장에 있습니다 — [검증 범위](#검증-범위).
 
 ## TL;DR
 
@@ -24,6 +23,8 @@ LLM은 EKS의 GPU 노드에서 **KServe + vLLM으로 직접 서빙**하고, 색�
 | 색인 갱신 | KFP 파이프라인: 파싱 → 청킹 → 임베딩 → 적재 → **평가 통과 시에만 승격** (서비스 중 색인은 그대로) |
 | 검색 평가 (로컬) | 평가 세트 40문항, **Recall@5 0.972** · MRR@5 0.868 |
 | 생성 평가 (로컬 4bit) | 거절 정확도 1.0 · 인용 정확도 1.0 · 핵심 표현 포함률 0.54 — **직접 읽어 보니 36개 중 정확 23 · 부분 6 · 오답 7** |
+| 생성 평가 (EKS FP8) | 거절 1.0 · 인용 1.0 · 핵심 표현 0.628 · 문항당 4.4초 — **정확 26 · 부분 5 · 오답 5** |
+| EKS 실측 | law-llm 기동 약 11분(그중 vLLM 이미지 받기 5분), 질의 약 3초, 색인 파이프라인 6 ~ 7분, 검색 지표는 로컬과 같음 |
 | 명령 (로컬) | `make rag-index-local` → `make rag-eval-local` → `make llm-local` + `make rag-api-local` |
 | 명령 (EKS) | `make images-rag` → `rag-data` → `llm-cache` → `rag-platform` → `llm` → `rag-index` → `rag-ask` → **`llm-down`** |
 
@@ -75,7 +76,7 @@ S3
 make check-tools            # aws, terraform, kubectl, kustomize, helm, docker(buildx), envsubst, python3, jq
 cp .env.example .env        # KF_USER_PASSWORD 변경 (6주차 값은 주석 — 기본값은 scripts/env.sh)
 cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
-make venv && make test      # 단위 테스트 82개 (+ 로컬 DB 통합 테스트 2개는 RAGDB_TEST=1일 때)
+make venv && make test      # 단위 테스트 84개 (+ 로컬 DB 통합 테스트 2개는 RAGDB_TEST=1일 때)
 ```
 
 로컬 실습에는 Docker(pgvector 컨테이너)가 필요하고, 로컬 LLM은 **Apple Silicon**(mlx-lm) 기준입니다.
@@ -159,9 +160,9 @@ mlx-lm 서버는 vLLM과 같은 OpenAI 호환 API라, rag-api 코드는 `LLM_BAS
 오답 예: 최대 과태료 "3천만원"(실제 5천만원), 시행일 "9월 10일"(실제 9월 11일 — "공포 후 6개월"을 모델이 계산), 주민번호를 "받아도 되지만"(원칙 금지를 뒤집음), 삭제 요구 질문에 처리정지 조문으로 답함.
 **인용 검증은 "검색된 조를 인용했는지"만 봅니다.** 오답 대부분이 정답 조를 정확히 인용했으므로, 승격 기준으로는 필요조건일 뿐이고 핵심 표현 포함률과 리포트의 답변 원문을 함께 봐야 합니다. 개선 과제(숫자 · 날짜는 조문 그대로, 원칙 먼저 쓰기, EKS FP8 모델과 비교)는 PLAN.md 10.6에 있습니다.
 
-## 2. EKS에 올리기 (준비 완료 · 미검증)
+## 2. EKS에 올리기 (EKS 실측)
 
-> 아래는 코드 · 매니페스트로 준비한 절차입니다. **아직 클러스터에서 실행하지 않았습니다.** 실행하면서 막히는 곳은 [문제 해결](#문제-해결)과 PLAN.md 10.12를 참고하세요.
+> 아래 절차를 2026-11-26 ~ 27에 새 클러스터에서 처음부터 끝까지 실행했습니다. 실측값은 [2.5](#25-eks-실측-2026-11-26--27)에 있습니다.
 
 ### 2.1 사전 조건
 
@@ -173,7 +174,7 @@ make images       # (4 · 5주차 이미지)
 make kubeflow && make ingress && make mlflow && make extras
 ```
 
-일반 노드 2대에 rag-api(메모리 3 ~ 4Gi)와 ragdb가 더해지므로 `terraform.tfvars`에서 `cpu_node_count = 3`을 권합니다.
+일반 노드 2대로도 6주차 전 과정이 돌았습니다(EKS 실측 — 색인 파이프라인의 embed 단계만 임시 CPU 노드 `burst`로 감). 4 · 5주차 실습을 함께 띄워 두면 `cpu_node_count = 3`을 권합니다.
 
 ### 2.2 순서
 
@@ -183,7 +184,7 @@ make rag-data                     # PDF → s3://<bucket>/datasets/law/21445-202
 make llm-cache                    # Qwen3-8B-FP8 · bge-m3 가중치 Hugging Face → S3 models/ (클러스터 Job, 한 번만)
 make rag-platform                 # ragdb(pgvector) + rag-api + 접근 정책
 make rag-index NO_GEN=1           # 첫 색인: 검색 평가만으로 승격 (LLM 없이)
-make llm                          # law-llm 배포 → GPU 노드 기동 → Ready 대기 (최대 30분)
+make llm                          # law-llm 배포 → GPU 노드 기동 → Ready 대기 (EKS 실측 약 11분)
 make rag-ask Q="14살 아이가 앱에 가입하려면 보호자 동의가 필요한가요?"
 make rag-index                    # 생성 평가까지 포함한 색인 (KFP 캐시로 파싱 · 임베딩은 건너뜀)
 make rag-status
@@ -199,10 +200,11 @@ make llm-down                     # ← 끝나면 꼭. GPU 온디맨드 시간�
 | KServe **커스텀 컨테이너**로 vLLM 이미지 지정 | 내장 Hugging Face 런타임은 vLLM 버전(0.24 계열)을 고를 수 없음 |
 | 배포 모드 **Standard** (Knative 아님) | 클러스터 내부 전용이라 scale-to-zero · 카나리가 필요 없음. Knative는 init container를 기본으로 막고, 첫 기동(이미지 10GB + 가중치 9GB)이 기한을 넘기기 쉬움. KServe 0.21의 값은 `Standard` · `Knative` |
 | 가중치는 **S3 캐시 + init container(aws-cli)** | 노드가 뜰 때마다 Hugging Face에서 받지 않게. KServe storage-initializer는 Pod Identity 자격 증명 주입을 장담할 수 없어 직접 받음 |
-| init container를 **UID 1337**로 | Istio CNI가 앱 init container 트래픽도 아직 없는 사이드카로 돌리기 때문. istio-proxy UID는 가로채기에서 빠짐 |
-| NodePool **gpu-serving** (온디맨드 g6.xlarge, 상한 1) | 학습용 `gpu`(Spot, 쓰고 끄기)와 분리. L4는 FP8 지원 → 8B 모델 가중치 약 9GB |
+| init container를 **UID 1337**로 | Istio CNI가 앱 init container 트래픽을 아직 없는 사이드카로 돌리는 경우를 대비. EKS 실측에서는 Istio가 **네이티브 사이드카**(istio-proxy가 init container로 먼저 뜸)로 동작해 필요 없었지만, 해는 없어 그대로 둠 |
+| NodePool **gpu-serving** (온디맨드 g6.xlarge, 상한 1) | 학습용 `gpu`(Spot, 쓰고 끄기)와 분리. FP8 가중치 약 9GB → L4 24GB에 KV 캐시 9GiB. **EKS 실측: vLLM 0.33은 L4에서 FP8 연산이 아닌 가중치 전용 FP8(Marlin)을 씀** — 메모리 절약만 얻음 |
 | NVIDIA device plugin을 `node-role In [gpu, gpu-serving]`에 | 기존 설정(`node-role=gpu`만)이면 서빙 노드에 `nvidia.com/gpu`가 안 생겨 파드가 영원히 Pending |
 | law-llm은 **cluster-local + rag-api principal만** 허용 | 4주차 추론 서비스의 "모두 허용"보다 좁힘. 외부에는 rag-api만 노출 |
+| CPU · 메모리 **상한을 반드시 명시** | 비워 두면 KServe가 기본값(cpuLimit 1, memoryLimit 2Gi)을 채워, 요청(cpu 2)보다 작아 Deployment가 거부됨 (EKS 실측) |
 
 ### 2.4 색인 파이프라인
 
@@ -216,6 +218,32 @@ parse-pdf → chunk → embed → load-index → eval-retrieval ─┬ Recall@5 
 - MLflow 실험 `law-rag-index`에 색인 버전마다 실행 하나 — PDF SHA-256, 청크 수, 지표, 승격 여부, 교체된 이전 버전.
 - 생성 평가는 law-llm이 떠 있어야 해서, `make rag-index`는 law-llm이 Ready가 아니면 제출을 거부하고 `NO_GEN=1`을 안내합니다.
 - 법이 개정되면: 새 PDF를 `docs/`에 넣고 `make rag-data PDF=…` → `make rag-index`. 파이프라인 없이 Job 하나로 하려면 `make rag-index-job`.
+
+### 2.5 EKS 실측 (2026-11-26 ~ 27)
+
+| 단계 | 소요 · 결과 |
+|---|---|
+| `make infra` | 약 12분. NodePool `gpu-serving`, device plugin 배치, Pod Identity(`law-llm` · `rag-api`), ECR `mlops/rag` 반영 확인 |
+| `make images` · 플랫폼 | 22분 · 약 8분 |
+| `make llm-cache` | bge-m3 2.30GB 87초, Qwen3-8B-FP8 9.45GB 4분 40초 |
+| `make rag-index NO_GEN=1` | 7분 (embed 3분 41초 — CPU 2코어 임베딩 120초). Recall@5 **0.9722** · MRR@5 0.8681 — 로컬과 같음 |
+| `make llm` | 적용 → Ready **약 11분**: GPU 노드 46초 · S3 가중치 75초 · **vLLM 이미지(Docker Hub 9.74GB) 4분 55초** · vLLM 로딩 약 3분 |
+| law-llm 자원 | CUDA 드라이버 580.178.04 + torch cu130 호환, GPU 메모리 19.5 / 23GiB(가중치 8.9 · KV 캐시 9.06GiB = 65,968토큰, 8K 요청 동시 8개) |
+| `make rag-ask` | 200 OK, 약 3초(검색 0.16 + 생성 2.7초). 첫 질의만 12초(검색 초기화 8.4초). 토큰 없이 403 |
+| `make rag-index` (생성 평가) | 6분 21초 — parse · chunk · embed **KFP 캐시 0초**, 생성 평가 40문항 3분 21초 → 새 색인 승격 · 이전 색인 교체 |
+| 생성 평가 (FP8) | 인용 1.0 · 거절 1.0 · 정답 조 인용 0.944 · 핵심 표현 0.628 · 직접 판정 **정확 26 · 부분 5 · 오답 5** (로컬 4bit 23 · 6 · 7) |
+
+EKS에서 처음 실행하며 고친 것:
+
+| # | 증상 | 원인 → 조치 |
+|---|---|---|
+| ① | `make images`가 `No space left on device` | 로컬 colima Docker 디스크 가득 참 → 예전 이미지 · 참조 끊긴 빌드 캐시 정리 |
+| ② | `make infra` 뒤 AWS provider 6.73.0 → 6.74.0 | `terraform init -upgrade`가 lock 파일 무시 → lock 복원, `-upgrade` 제거 |
+| ③ | rag-api가 Ready가 안 됨(readiness 500) | 새 ragdb에 테이블 없음(스키마는 색인 때만 생성) → rag-api 시작 시 스키마 생성 |
+| ④ | law-llm Deployment 생성 거부 | CPU 상한을 비워 KServe 기본 cpuLimit 1이 들어감 → `limits.cpu: 4` 명시 |
+| ⑤ | law-llm은 Ready인데 `make llm`이 안 끝남 | 재적용 후 KServe가 `observedGeneration`을 갱신하지 않아 `kubectl wait --for=condition`이 무시 → 롤아웃 + jsonpath로 대기 |
+
+다음에 바꿀 것: vLLM 이미지를 ECR에 복사(기동 11분 중 5분), rag-api 시작 시 임베딩 미리 계산(첫 질의 8.4초), 숫자 · 날짜 · 원칙 오류 5건을 겨냥한 프롬프트 개선 후 재평가.
 
 ## 3. 노드 구성 — Karpenter
 
@@ -248,7 +276,7 @@ make destroy       # 전체 삭제 (ALB · PVC · Karpenter 노드 정리 후 te
 
 ## 5. 주의할 점 · 한계
 
-- **법률 자문이 아닙니다.** 모든 응답과 화면에 안내 문구를 붙입니다. 로컬 생성 평가에서 36개 중 7개가 오답이었습니다.
+- **법률 자문이 아닙니다.** 모든 응답과 화면에 안내 문구를 붙입니다. 생성 평가에서 36개 중 오답이 로컬 4bit 7개, EKS FP8 5개였습니다(최대 과태료 · 시행일 · 원칙 오류는 둘 다 틀림).
 - **범위는 법률 PDF 하나입니다.** "대통령령으로 정한다"로 끝나는 세부 내용(시행령 · 고시)은 없습니다. 같은 방식으로 PDF를 추가해 넓힐 수 있습니다.
 - **일상어 질문에 약합니다**(q08 "넘기려면" ↔ "제공"). 개선 후보: LLM으로 질문을 법률 용어로 바꿔 검색, 키워드 검색 병행.
 - **현행 · 시행 예정이 섞인 조**(제2조처럼)는 답이 어느 쪽을 썼는지 코드로 가릴 수 없어 "개정 내용이 있다"고만 알립니다.
@@ -259,14 +287,18 @@ make destroy       # 전체 삭제 (ALB · PVC · Karpenter 노드 정리 후 te
 
 ### LLM RAG (6주차)
 
-EKS 항목은 실행 전에 예상한 대응입니다(미검증).
+★ 표시는 EKS에서 실제로 겪고 고친 것입니다. 나머지 EKS 항목은 예상한 대응입니다.
 
 | 증상 | 확인할 것 |
 |---|---|
 | law-llm 파드가 계속 `Pending` | `kubectl get nodes -l node-role=gpu-serving` — 노드가 없으면 `kubectl get nodeclaims`, Karpenter 로그. 노드는 있는데 Pending이면 `kubectl describe node`에 `nvidia.com/gpu`가 있는지 (없으면 `make infra`로 NVIDIA 플러그인 배치 갱신) |
 | law-llm init container(`fetch-model`) 실패 | `kubectl logs <파드> -c fetch-model` — AccessDenied면 `aws eks list-pod-identity-associations --cluster-name mlops`에 `law-llm`이 있는지, 타임아웃이면 Istio 가로채기(PLAN.md 10.12의 대안), 캐시가 없으면 `make llm-cache` |
 | law-llm이 Ready가 안 됨 / `OOMKilled` | `kubectl logs <파드> -c kserve-container` — CUDA 드라이버 오류면 vLLM 이미지 버전, 메모리 부족이면 `llm_instance_types = ["g6.2xlarge"]` |
-| InferenceService가 `deploymentMode` 때문에 거부됨 | `kubectl -n kubeflow get cm inferenceservice-config -o yaml`에서 지원 값 확인 |
+| ★ law-llm `Ready=False`, 파드가 아예 없음 (`ReconcileFailed … must be less than or equal to cpu limit`) | 템플릿의 `limits.cpu`가 빠진 것 — KServe가 기본 cpuLimit 1을 채움. `kubectl -n kserve get cm inferenceservice-config -o jsonpath='{.data.inferenceService}'`로 기본값 확인 |
+| ★ law-llm은 Ready인데 `make llm`이 끝나지 않음 | 예전 `install.sh`의 `kubectl wait --for=condition=Ready` 문제(observedGeneration). Ctrl-C 해도 law-llm은 정상 — 지금 코드는 롤아웃 + jsonpath로 대기 |
+| ★ rag-api가 `1/2`에서 멈춤 (readiness 500, `relation "active_index" does not exist`) | 예전 rag 이미지. 지금 코드는 시작 시 스키마를 만든다 — `make images-rag` 후 `kubectl -n kubeflow-user-example-com rollout restart deploy/rag-api` |
+| 첫 질의만 10초 이상 걸림 | rag-api 임베딩 초기화(EKS 실측 8.4초). 두 번째부터 검색 0.2초 안팎 |
+| InferenceService가 `deploymentMode` 때문에 거부됨 | `kubectl -n kserve get cm inferenceservice-config -o yaml`에서 지원 값 확인 (KServe 0.21: `Standard` · `Knative`) |
 | `/rag/ask`가 503 "서비스 중인 색인이 없습니다" | 색인을 아직 승격하지 않은 것 — `make rag-index NO_GEN=1` 또는 `make rag-index-job`, `make rag-status`로 확인 |
 | `/rag/ask`가 403 | `kubectl -n kubeflow-user-example-com get authorizationpolicy allow-rag-api`, 토큰(`make rag-ask`는 default-editor SA 토큰 사용) |
 | 답이 항상 "찾지 못함" | law-llm 연결 실패가 아니라면 `top_score`가 `RAG_MIN_SCORE`(0.48)보다 낮은 것. rag-api 로그와 응답의 `skipped_llm` 확인 |
@@ -358,8 +390,8 @@ kubectl -n kubeflow-user-example-com get isvc idcard-recognizer   # 두 번째 �
 ## 검증 범위
 
 - **6주차 — 로컬에서 확인 (2026-11-25 ~ 26)**: PDF 파싱 · 청킹(143청크), bge-m3 + pgvector 색인 · 검색, 검색 평가(Recall@5 0.972), mlx-lm(Qwen3-8B-4bit)으로 rag-api 전체 흐름과 40문항 생성 평가 + 답변 직접 판정, rag 이미지 빌드(arm64) · 컨테이너 안 실행, 색인 파이프라인 컴파일 · KFP 로컬 실행기(parse → chunk) · 로컬 DB로 전 단계(적재 → 평가 → 승격 → 복구), 테스트 82개 + DB 통합 2개.
-- **6주차 — 클러스터 없이 한 검증**: `terraform validate`, InferenceService(KServe 0.21 CRD) · NodePool(Karpenter 1.15.1 CRD) 스키마 검증, 템플릿 변수 검사.
-- **6주차 — 아직 실행하지 않은 것**: EKS의 모든 단계(가중치 캐시 Job, law-llm 기동 — CUDA 드라이버 호환 · g6.xlarge 메모리 · init container의 S3 접근, rag-api, 색인 파이프라인, 게이트웨이 경유 질의), EKS FP8 모델의 생성 평가, amd64 이미지 빌드.
+- **6주차 — EKS에서 확인 (2026-11-26 ~ 27)**: `make infra`부터 `make rag-index`(생성 평가 포함)까지 전 단계 — 가중치 캐시, ragdb · rag-api, 색인 파이프라인 2회(KFP 캐시 · 승격 · 교체), law-llm 기동(CUDA 드라이버 · 메모리 · S3 접근 · Standard 모드), ALB 경유 질의와 인증 거부(403), FP8 생성 평가와 답변 직접 판정. 실행 중 고친 것 5건.
+- **6주차 — 아직 확인하지 않은 것**: law-llm AuthorizationPolicy의 거부 동작(rag-api 외 호출), 브라우저 질의 화면(`/rag/`), Spot 서빙 노드, 프롬프트 개선 후 재평가, `make llm-down` · `make destroy` 후 잔존 자원.
 - **5주차 — EKS에서 확인** (2026-11-16): Karpenter(GPU Spot · 임시 노드 기동과 회수), `make tensorboard`, `make movierec`, `make tb` 인스턴스 접속, `make destroy`.
 - **4주차 — EKS에서 확인** (2026-11-13 ~ 16): 신분증 파이프라인 20/20, ALB 경유 추론.
 - 비용은 단가를 더한 추정이고 실제 청구액이 아닙니다.

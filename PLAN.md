@@ -1,13 +1,13 @@
 # EKS 기반 ML 플랫폼 실습 — 구현 계획서 (v5 초안)
 
-> 최초 작성: 2026-11-13 · 최종 수정: 2026-11-25 · 상태: v5 초안 (4주차 · 5주차 EKS 검증 완료 · 릴리즈 `v1.0.0`, **6주차 설계 중 — 10장**)
+> 최초 작성: 2026-11-13 · 최종 수정: 2026-11-27 · 상태: v5.1 (4주차 · 5주차 EKS 검증 완료 · 릴리즈 `v1.0.0`, **6주차 로컬 · EKS 검증 완료 — 7.4절 · 10장**)
 > 실행 방법은 [README.md](README.md), 해설은 4주차 · 5주차 블로그 글(README 맨 위 링크)
 
 | 주차 | 실습 | 핵심 구성 |
 |---|---|---|
 | 4주차 | 신분증 인식 MLOps 파이프라인 | Kubeflow Pipelines · MLflow · BentoML · KServe, GPU 학습 |
 | 5주차 | Kubeflow Tensorboard + 영화 추천 | Tensorboard 컨트롤러 · 웹 앱, MovieLens BPR 학습, TensorBoard 로깅 |
-| **6주차** (설계) | **LLM RAG — 개인정보 보호법 Q&A** | KServe + vLLM GPU 서빙, bge-m3 임베딩, pgvector, KFP 색인 파이프라인, MLflow 평가 · 추적 |
+| **6주차** | **LLM RAG — 개인정보 보호법 Q&A** | KServe + vLLM GPU 서빙, bge-m3 임베딩, pgvector, KFP 색인 파이프라인, MLflow 평가 · 추적 |
 | 공통 | 비용 절감 | Karpenter — GPU 노드는 학습 때만 Spot으로 (6주차 서빙은 온디맨드, 실습 중에만) |
 
 ## 0. 변경 이력
@@ -22,7 +22,8 @@
 | v3.3 | 11-14 | EKS 실측 반영: 학습 파드 CPU 요청 2 → 1 (taint 없는 GPU 노드에서 `Insufficient cpu`로 20분 Pending), 기본값 실행(10 epoch·3,000장) 통과 기록 |
 | v3.4 | 11-15 | GPU 비용 절감: 관리형 GPU 노드그룹을 Karpenter NodePool로 대체 (Spot 우선, 학습 때만 기동, taint 적용). 파이프라인용 임시 CPU NodePool(burst) 추가 |
 | v4 | 11-15 ~ 11-20 | **5주차 실습 추가**(Tensorboard 컨트롤러 · 웹 앱, MovieLens 영화 추천, 로그용 PVC). 클러스터 이름 `idcard-mlops` → `mlops`. MLflow presigned URL을 리전 엔드포인트로 고정(`MLFLOW_S3_ENDPOINT_URL`). Karpenter · 5주차 실습 EKS 검증. 릴리즈 `v1.0.0` |
-| **v5 초안** | 11-25 | **6주차 설계 추가**(10장): 개인정보 보호법 Q&A RAG(원본은 미리 내려받은 법률 PDF). vLLM을 KServe로 GPU 서빙(서빙 전용 온디맨드 NodePool), bge-m3 + pgvector, 색인 KFP 파이프라인(평가 통과 시 색인 승격), MLflow 추적. 브랜치 `feature/week6-llm-rag` |
+| v5 초안 | 11-25 | **6주차 설계 추가**(10장): 개인정보 보호법 Q&A RAG(원본은 미리 내려받은 법률 PDF). vLLM을 KServe로 GPU 서빙(서빙 전용 온디맨드 NodePool), bge-m3 + pgvector, 색인 KFP 파이프라인(평가 통과 시 색인 승격), MLflow 추적. 브랜치 `feature/week6-llm-rag` |
+| **v5.1** | 11-25 ~ 11-27 | **6주차 구현 · 검증**: 로컬(PDF 파싱 · 청킹 · bge-m3 + pgvector · 평가 세트 40문항 · mlx-lm 생성 평가) → EKS 전 단계 실행(7.4절). EKS에서 고친 것 5건(rag-api 스키마, KServe CPU 상한, `kubectl wait` observedGeneration, 로컬 Docker 디스크, `terraform init -upgrade` 제거). 설계 정정: L4에서 vLLM은 가중치 전용 FP8, Istio 네이티브 사이드카라 UID 1337 불필요 |
 
 ### 확정된 요구사항
 | 항목 | 결정 |
@@ -334,6 +335,37 @@ EKS에서 고친 문제 17건(Istio 웹훅 포트, MLflow OOM · CORS · 리전,
 **아직 검증하지 않은 것**: Spot 회수가 실제로 일어났을 때의 재시도와 온디맨드 대체, 대시보드 화면에서 Tensorboard 인스턴스 만들기(목록 화면까지만 확인), 학습 중 실시간 보기, 인스턴스가 떠 있을 때의 재학습, 뷰어 이미지 교체.
 원인을 확인하지 못한 것: Tensorboard 파드가 생성 직후 한 번 교체되는 이유, GPU 노드가 비운 뒤 삭제되기까지 약 7분 걸린 이유.
 
+### 7.4 EKS — 6주차 LLM RAG (클러스터 `mlops`, 2026-11-26 ~ 27, 한국 시간)
+
+| 항목 | 결과 |
+|---|---|
+| `make infra` (21:51 ~ 22:03) | 일반 노드 2대, NodePool `gpu-serving`(온디맨드 · `g6.xlarge` · GPU 상한 1), NVIDIA device plugin affinity `node-role In [gpu, gpu-serving]`, Pod Identity `law-llm` · `rag-api`, ECR `mlops/rag` |
+| `make images` (22:32 ~ 22:54) | 22분. 첫 시도는 로컬 Docker 디스크 부족으로 실패 → 정리 후 재시도 |
+| 플랫폼 (22:58 ~ 23:06) | 약 8분, 모든 파드 Running |
+| `make llm-cache` (23:13 ~ 23:18) | bge-m3 14개 2.30 GB 87초(HF 34.6초 · S3 18.6초), Qwen3-8B-FP8 12개 9.45 GB 4분 40초(HF 184.1초 · S3 73.9초) |
+| `make rag-platform` | ragdb 정상. rag-api readiness 500(빈 DB에 테이블 없음) → 수정 · 재빌드 · 재시작 후 Ready(bge-m3 init 19 ~ 27초) |
+| `make rag-index NO_GEN=1` (23:30 ~ 23:37) | 7분, 승격. embed 3분 41초(받기 · 로딩 22.4초 + 143청크 120.4초, CPU 2코어 — 로컬 22 ~ 41초보다 3 ~ 5배 느림, 임시 CPU 노드 c6i.xlarge Spot에서 실행). **청크 143 · Recall@5 0.9722 · MRR@5 0.8681 · 시행 예정 2/2 · 답 없음 기준 0.498 — 로컬과 같음** |
+| `make llm` (23:41 ~ 23:52, 재적용 기준) | 처음엔 Deployment 거부(KServe 기본 cpuLimit 1) → `limits.cpu: 4` 수정 후 **약 11분**: GPU 노드 46초 · S3 가중치 75초 · vLLM 이미지(Docker Hub 9.74 GB) **4분 55초** · vLLM 로딩 약 3분 15초(가중치 71초, 컴파일 · CUDA 그래프 62초) |
+| law-llm | 드라이버 580.178.04 + torch 2.14.0+cu130 호환, GPU 메모리 19.5 / 23 GiB(가중치 8.9 · KV 캐시 9.06 GiB = 65,968토큰, 8K 요청 동시 8.05개). **vLLM 0.33은 L4에서 가중치 전용 FP8(Marlin)**. Istio 네이티브 사이드카, Service `law-llm-predictor` |
+| `make rag-ask` (23:56 ~ 23:58) | 200 OK. 첫 질의 12.0초(검색 8.4초 — 임베딩 초기화, 생성 3.6초), 두 번째 검색 0.16 · 생성 2.7초. 토큰 없이 403(`ext_authz_denied`). MLflow `law-rag` 트레이스 기록 |
+| `make rag-index` (23:59 ~ 00:06) | 6분 21초. parse · chunk · embed **KFP 캐시 0초**, eval-retrieval 50초, eval-generation 3분 21초(40문항, rag-api 경유) → 새 색인 승격 · 이전 색인 교체(MLflow `promoted=true`) |
+| 생성 평가 (Qwen3-8B-FP8) | 거절 1.0 · 잘못된 거절 0 · 인용 1.0 · 정답 조 인용 0.944 · 핵심 표현 0.628 · 시행일 명시 1.0 · 문항당 생성 4.4초(로컬 4bit 65초) |
+| 답변 직접 판정 (36문항) | **정확 26 · 부분 5 · 오답 5** (로컬 4bit 23 · 6 · 7). 나아짐: q11 · q05 · q03 · q12 · q28 / 나빠짐: q14 / 그대로 오답: q02 · q08 · q25 · q31 · q35(숫자 · 날짜 · 원칙 · 검색 실패) |
+
+**EKS에서 고친 것**
+
+| # | 증상 | 원인 | 조치 (커밋) |
+|---|---|---|---|
+| ① | `make images` `No space left on device` | 로컬 colima Docker 디스크(98 GB) 가득 참 | 예전 이미지 · 참조 끊긴 빌드 캐시 정리(코드 변경 없음) |
+| ② | AWS provider 6.73.0 → 6.74.0 | Makefile `terraform init -upgrade`가 lock 파일 무시 | lock 복원, `-upgrade` 제거 (`d69c5c4`) |
+| ③ | rag-api readiness 500 | healthz가 `active_index` 조회, 스키마는 색인 때만 생성 | 시작 시 `init_schema` (`f4d070c`) |
+| ④ | law-llm Deployment 거부 | 상한을 비우면 KServe 기본값(cpuLimit 1)이 들어가 요청 cpu 2보다 작음 | `limits.cpu: 4` + 상한 ≥ 요청 테스트 (`dacb86c`) |
+| ⑤ | law-llm Ready인데 `make llm` 대기가 안 끝남 | 재적용 후 generation 2 · `status.observedGeneration` 1 → `kubectl wait --for=condition`이 무시 | 롤아웃 완료 + jsonpath Ready로 대기 (`install.sh`) |
+
+③ · ④는 오프라인 검증(CRD 스키마)으로 잡을 수 없는 종류였다 — ④는 컨트롤러가 기본값을 채운 뒤에, ③은 빈 DB에서 띄워야 드러난다.
+
+**아직 확인하지 않은 것**: law-llm AuthorizationPolicy의 거부 동작(rag-api 외 호출), 브라우저 질의 화면, Spot 서빙 노드, `make llm-down` · `make destroy` 후 잔존 자원.
+
 ## 8. 비용 (서울, 대략)
 
 | 항목 | 시간당 (USD) |
@@ -375,9 +407,9 @@ GPU Spot 시세 (서울, 2026-11-15 조회, 시간당): `g4dn.xlarge` 약 0.33 �
 | 개인정보 | 합성 데이터만 사용, 응답 전 필드 마스킹. MovieLens는 공개 데이터셋(재배포하지 않음) |
 | KServe predictor 접근 정책을 모두 허용 | 게이트웨이 인증은 유지됨. 운영 시 principal 기반으로 좁힐 것 |
 
-## 10. 6주차 설계 — LLM RAG: 개인정보 보호법 Q&A (v5 초안, 미구현)
+## 10. 6주차 설계 — LLM RAG: 개인정보 보호법 Q&A (구현 · 로컬 · EKS 검증 완료)
 
-> 브랜치 `feature/week6-llm-rag`. 구현 · EKS 검증을 마치면 1 ~ 9장에 합치고 릴리즈 `v1.1.0`으로 올린다.
+> 브랜치 `feature/week6-llm-rag`. 로컬 검증(2026-11-25 ~ 26)과 EKS 검증(2026-11-26 ~ 27, 7.4절)을 마쳤다. main 머지 후 릴리즈 `v1.1.0`.
 
 ### 10.1 목표와 범위
 
@@ -398,12 +430,12 @@ GPU Spot 시세 (서울, 2026-11-15 조회, 시간당): `g4dn.xlarge` 약 0.33 �
 
 | 제품 | 고정 버전 | 상태 | 비고 |
 |---|---|---|---|
-| vLLM (서빙 이미지) | **`vllm/vllm-openai:v0.33.0`** | 태그 확인(11-02, amd64 9.7 GB). CUDA 드라이버 호환은 EKS에서 확인 | 0.34.0(11-16)은 2주 미만이라 제외 |
+| vLLM (서빙 이미지) | **`vllm/vllm-openai:v0.33.0`** | **EKS 확인** — 드라이버 580.178.04 + torch cu130 호환 | 0.34.0(11-16)은 2주 미만이라 제외. amd64 9.74 GB, Docker Hub에서 받기 4분 55초(기동의 가장 큰 병목 → ECR 복사 후보) |
 | KServe | 0.21.0 (기존) | 확인 | 내장 Hugging Face 런타임(`kserve/huggingfaceserver:v0.21.0`)은 vLLM 0.24 계열이라 쓰지 않고, 4주차처럼 **커스텀 predictor 컨테이너**로 vLLM 이미지를 직접 지정한다. 배포 모드 값은 `Standard` · `Knative`(Kubeflow 26.10.0 매니페스트에서 확인, `RawDeployment`는 0.21 매니페스트에 없음) |
 | aws-cli (init container) | **`amazon/aws-cli:2.40.1`** (11-11) | 확인 | S3 → emptyDir 가중치 받기. 2.40.2 이후는 2주 미만 |
 | huggingface-hub / boto3 | **2.4.0** (10-29) / **1.44.2** (기존) | 확인 | 가중치 캐시 Job(`lawrag.cache`), 색인 Job의 S3 PDF 읽기 |
 | 모델 (확인) | `Qwen/Qwen3-8B-FP8`(Apache-2.0) · `BAAI/bge-m3`(MIT) | Hugging Face API로 확인 | bge-m3는 `onnx/` · `imgs/`를 빼고 약 2.3 GB만 캐시 |
-| LLM | **`Qwen/Qwen3-8B-FP8`** (기본) | 구현 시 모델 카드 · 한국어 품질 확인 | Apache-2.0. FP8 가중치 약 9 GB라 L4 24 GB에 KV 캐시 여유가 크다. thinking 모드는 끈다(`chat_template_kwargs.enable_thinking=false`) |
+| LLM | **`Qwen/Qwen3-8B-FP8`** (기본) | **EKS 확인** | Apache-2.0. 가중치 8.9 GiB, L4에서 KV 캐시 9.06 GiB. **vLLM 0.33은 L4에서 FP8 연산이 아닌 가중치 전용 FP8(Marlin)을 쓴다** — 메모리 절약만 얻음. thinking 모드는 끈다(`chat_template_kwargs.enable_thinking=false`). 생성 평가 직접 판정 정확 26 · 부분 5 · 오답 5 |
 | LLM 비교 후보 | `Qwen3.5-9B` (2026-03, Apache-2.0) | 구현 시 확인 | 평가 세트(10.6)로 기본 모델과 비교해서 좋으면 교체. 라이선스가 모델 크기별로 다른 Qwen3.8 계열은 제외 |
 | 임베딩 모델 | `BAAI/bge-m3` | 확인 | MIT, 1024차원, 최대 8192 토큰, 100개 이상 언어 |
 | sentence-transformers / transformers | **6.2.0** (10-21) / **5.22.2** (11-06) | 확인 (torch 2.14.1과 로컬 실행) | 임베딩 계산. 6.3.0(11-11)은 2주 미만이라 제외 |
@@ -444,7 +476,7 @@ GPU Spot 시세 (서울, 2026-11-15 조회, 시간당): `g4dn.xlarge` 약 0.33 �
 - **서빙 전용 NodePool을 따로 둔다.** 기존 `gpu` NodePool은 학습용(Spot 우선, 상한 1)이다. 서빙 파드가 거기에 올라가면 학습과 GPU를 다투고 Spot 회수 때 서비스가 끊긴다. `gpu-serving`은 온디맨드 `g6.xlarge`(L4, FP8 지원)로 고정하고 GPU 상한도 따로 1을 둔다. 실습 중 비용을 줄이려면 `llm_capacity_types = ["spot", "on-demand"]`로 바꿀 수 있다.
 - **가중치는 S3에 캐시한다.** 노드가 새로 뜰 때마다 Hugging Face에서 내려받지 않도록 `make llm-cache`가 클러스터 안의 Job으로 한 번 복사한다(HF → `s3://<bucket>/models/`, 끝나면 `_COMPLETE.json`에 리비전 기록 → 같은 리비전은 건너뜀).
 - **서빙 파드는 init container(aws-cli)로 S3에서 받는다.** (구현 단계에서 바꿈) KServe storage-initializer는 KServe 웹훅이 나중에 끼워 넣는 컨테이너라 Pod Identity 자격 증명이 주입되는지 장담할 수 없다. 직접 정의한 init container는 파드 생성 시점에 있으므로 확실히 주입된다.
-- **init container는 UID 1337로 실행한다.** Kubeflow의 Istio CNI는 앱 init container의 트래픽도 사이드카로 돌리는데, 그 시점엔 사이드카가 아직 없어 S3에 닿지 못한다. istio-proxy UID(1337)는 가로채기에서 빠진다. emptyDir는 누구나 쓸 수 있어 권한 문제가 없다.
+- **init container는 UID 1337로 실행한다.** Kubeflow의 Istio CNI는 앱 init container의 트래픽도 사이드카로 돌리는데, 그 시점엔 사이드카가 아직 없어 S3에 닿지 못한다. istio-proxy UID(1337)는 가로채기에서 빠진다. emptyDir는 누구나 쓸 수 있어 권한 문제가 없다. **EKS 실측**: 이 클러스터의 Istio는 네이티브 사이드카(istio-proxy가 init container로 먼저 뜸)로 동작해 UID 1337 처리는 필요 없었다. 해는 없어 그대로 둔다.
 - **NVIDIA device plugin을 서빙 노드에도 띄운다.** 기존 설정은 `node-role=gpu`에만 배치해서, `node-role=gpu-serving` 노드에는 `nvidia.com/gpu` 리소스가 생기지 않아 vLLM 파드가 영원히 Pending이 된다 → affinity를 `node-role In [gpu, gpu-serving]`으로 바꿈(`infra/terraform/k8s.tf`).
 - **콜드 스타트에 대비한다.** 노드 기동(약 1분), vLLM 이미지 받기(약 10 GB), 가중치 받기 · 로딩을 합치면 첫 Ready까지 5 ~ 10분 걸릴 것으로 본다. `startupProbe`로 20분까지 기다리고, `make llm`은 30분까지 Ready를 기다린다.
 - **임베딩은 rag-api 안에서 CPU로 돌린다.** 질의 1건 임베딩은 CPU로 충분하고, 색인 대상도 약 200 청크라 GPU가 필요 없다. 임베딩용 KServe를 따로 두지 않아 구성 요소가 하나 줄어든다.
@@ -510,7 +542,7 @@ POST /rag/ask {"question": "...", "index_version": (선택, 평가용)}
 - `GET /rag/`는 질문 입력과 근거 조문(원문 쪽 번호 포함) 펼쳐보기만 있는 단순 HTML 화면.
 - 스트리밍은 1차 범위에서 제외(Knative · Istio 경유 SSE는 구현 후 확인).
 
-### 10.6 색인 파이프라인 (`pipelines/rag_index_pipeline.py`, 구현됨 · EKS 미검증)
+### 10.6 색인 파이프라인 (`pipelines/rag_index_pipeline.py`, 구현 · EKS 검증)
 
 ```
 [parse-pdf] → [chunk] → [embed] → [load-index] → [eval-retrieval] ─┬─ Recall@5 ≥ min_recall ─┬─ 생성 평가 켬: [eval-generation] ─┬─ 인용 정확도 ≥ 기준 → [promote]
@@ -589,7 +621,7 @@ PDF의 SHA-256을 MLflow 실행 파라미터로 남겨, 어떤 원본으로 만�
 4. **원칙과 예외를 뒤집는 오류**(q02 · q11). 개선 후보: "원칙(금지/허용)을 먼저 쓰고 예외를 나열" 규칙.
 5. 로컬 4bit 모델 결과다. EKS의 `Qwen3-8B-FP8`(vLLM)과 비교 후보 `Qwen3.5-9B`로 같은 평가를 돌려 비교한다 — 생성 품질 기준(핵심 표현 포함률 하한)은 그 결과를 보고 정한다.
 
-### 10.7 인프라 · 플랫폼 변경 (구현됨, EKS 미검증)
+### 10.7 인프라 · 플랫폼 변경 (구현 · EKS 검증)
 
 | 대상 | 변경 |
 |---|---|
@@ -610,6 +642,8 @@ PDF의 SHA-256을 MLflow 실행 파라미터로 남겨, 어떤 원본으로 만�
 | `docs/개인정보 보호법(법률)(제21445호)(20260911).pdf` | 저장소에 커밋(282 KB, 저작권 보호 대상 아님) |
 
 **클러스터 없이 한 검증**: `terraform validate` · `fmt`, 템플릿 렌더링 → YAML 파싱 → InferenceService(Kubeflow 26.10.0의 KServe CRD) · NodePool(Karpenter v1.15.1 CRD) 스키마 검증(잘못된 값을 넣으면 거부되는 것도 확인), 템플릿 변수 ⊆ install.sh가 넘기는 변수(`test_platform_rag.py`), rag 이미지 로컬 빌드 · 실행.
+
+**EKS 검증** (7.4절): 위 변경이 모두 의도대로 반영됐다. 실행 중 고친 것 — `llm-isvc.yaml.tmpl`에 `limits.cpu: 4`(KServe 기본 cpuLimit 1), rag-api 시작 시 스키마 생성, `install.sh llm`의 대기를 롤아웃 + jsonpath로(observedGeneration 문제), Makefile `terraform init`에서 `-upgrade` 제거. 일반 노드는 2대로도 전 과정이 돌았다(embed 단계만 burst 노드).
 
 ### 10.8 Makefile 타깃
 
@@ -651,9 +685,9 @@ images/rag/         Dockerfile
 ### 10.10 구현 순서와 검증 계획
 
 1. **로컬** — PDF 파싱 · 청킹 단위 테스트(`make rag-parse-local`), 로컬 Docker pgvector에 색인(`make rag-index-local`), 평가 세트 작성 · 검색 평가(`make rag-eval-local`), Apple Silicon mlx-lm으로 Qwen3-8B-4bit를 띄워(`make llm-local`) rag-api 전체 흐름 확인(`make rag-api-local`) · 생성 평가(`make rag-gen-eval-local`)
-2. **EKS 플랫폼** — `make infra`(gpu-serving NodePool) → `images-rag` → `rag-data` → `llm-cache` → `rag-platform` → `rag-index-job` → `llm` (첫 Ready 시간, GPU 메모리, 초당 토큰 수 기록) → 같은 평가 세트로 EKS 생성 평가(로컬 4bit와 비교)
-3. **파이프라인** — `make rag-index NO_GEN=1`(첫 색인) → `make llm` 후 `make rag-index`(생성 평가 포함, KFP 캐시로 parse-pdf · chunk · embed 재사용 확인) → `MIN_RECALL=0.99`로 미달 경로 확인(서비스 중 색인 유지)
-4. **질의** — `make rag-ask`, 브라우저 `/rag/`, MLflow 트레이스 확인, 토큰 없이 403
+2. **EKS 플랫폼** — `make infra`(gpu-serving NodePool) → `images-rag` → `rag-data` → `llm-cache` → `rag-platform` → `llm` — **완료(7.4절)**: 첫 Ready 약 11분, GPU 메모리 19.5 / 23 GiB, 짧은 요청 41토큰 1.4초. EKS 생성 평가(FP8)는 로컬 4bit보다 정확 23 → 26, 오답 7 → 5
+3. **파이프라인** — `make rag-index NO_GEN=1`(첫 색인, 7분) → `make llm` 후 `make rag-index`(생성 평가 포함, 6분 21초, KFP 캐시로 parse · chunk · embed 0초) — **완료**. 미달 경로(`MIN_RECALL=0.99`)는 EKS에서 아직 확인하지 않음(로컬 · DAG 테스트로만)
+4. **질의** — `make rag-ask` 200 OK(약 3초, 첫 질의 12초), MLflow 트레이스, 토큰 없이 403 — **완료**. 브라우저 `/rag/` 화면은 아직 확인하지 않음
 5. **정리** — `make llm-down` 후 GPU 노드 0대, `make destroy` 잔존 자원 없음
 
 기록할 값: 첫 Ready까지 시간, 질의 지연(검색 / 생성 분리), Recall@5 · 인용 정확도, 시간당 비용.
@@ -672,11 +706,11 @@ images/rag/         Dockerfile
 | 위험 | 대응 |
 |---|---|
 | GPU 서빙 노드를 켜 둔 채 방치 | `make llm-down` 안내를 README · `make info`에 표시. `make destroy`가 NodePool을 먼저 지움 |
-| vLLM 이미지의 CUDA와 AL2023 NVIDIA AMI 드라이버 불일치 | 구현 1단계에서 드라이버 버전 확인. 맞지 않으면 vLLM 직전 버전으로 낮춤 |
-| 첫 기동이 오래 걸림 | Standard 모드라 Knative 기한 없음. `startupProbe` 20분, `make llm` 대기 30분, 가중치 S3 캐시. 노드에 이미지가 남아 있으면 두 번째부터 빠름 |
-| init container가 S3에 닿지 못함 (Istio CNI 가로채기) | UID 1337로 실행. 그래도 실패하면 Istio 네이티브 사이드카 여부 확인 후 `traffic.sidecar.istio.io/excludeOutboundPorts: "443"` 주석으로 대체 |
-| g6.xlarge 메모리(16GiB) 부족으로 vLLM 파드가 뜨지 않거나 OOM | requests 10Gi · limits 13Gi. 부족하면 `llm_instance_types = ["g6.2xlarge"]`(32GiB) |
-| Pod Identity 자격 증명이 init container에 없음 | 파드 생성 시 정의된 컨테이너에는 주입된다. 실패하면 `kubectl describe pod`로 `AWS_CONTAINER_CREDENTIALS_FULL_URI` 확인 |
+| vLLM 이미지의 CUDA와 AL2023 NVIDIA AMI 드라이버 불일치 | **EKS 확인 — 문제없음**(드라이버 580.178.04, torch cu130). 버전을 올릴 때 다시 확인 |
+| 첫 기동이 오래 걸림 | Standard 모드라 Knative 기한 없음. `startupProbe` 20분, 가중치 S3 캐시. **EKS 실측 약 11분, 그중 vLLM 이미지 받기 4분 55초** → vLLM 이미지를 ECR에 복사하면 줄어듦(다음 과제) |
+| init container가 S3에 닿지 못함 (Istio CNI 가로채기) | **EKS 확인 — 문제없음**. Istio가 네이티브 사이드카로 동작해 UID 1337이 아니어도 됐다. 다른 Istio 설정의 클러스터를 위해 UID 1337은 유지 |
+| g6.xlarge 메모리(16GiB) 부족으로 vLLM 파드가 뜨지 않거나 OOM | **EKS 확인 — 문제없음**(requests 10Gi · limits 13Gi, OOM 없음). 상한은 CPU · 메모리 모두 명시해야 한다(KServe 기본값 — 7.4절 ④) |
+| Pod Identity 자격 증명이 init container에 없음 | **EKS 확인 — 문제없음**(law-llm · rag-api · 색인 Job 모두 S3 접근 성공) |
 | FP8 모델의 한국어 품질 저하 | 평가 세트로 bf16(약 16 GB, `max-model-len` 8192로 제한)과 비교 |
 | Qwen3 thinking 출력(`<think>`)이 답변에 섞임 | `enable_thinking=false`, 응답 후처리에서 태그 제거 |
 | **현행 · 시행 예정 조문을 섞어 답함** | 청크에 상태 · 시행일 메타데이터와 머리말 표시, 프롬프트 규칙, 평가 세트에 시행 예정 질문 포함 |
@@ -685,6 +719,7 @@ images/rag/         Dockerfile
 | 법 개정으로 답이 바뀜 | 색인 버전에 법률 번호 · 시행일 포함, 응답에 `index_version` 표시. 새 PDF로 `make rag-data` → `make rag-index` |
 | 모델이 근거 없는 조문을 지어냄 | 인용 검증(⑤) 결과를 응답에 표시, 평가 지표로 승격 차단 |
 | 시행령 · 고시에 있는 내용("대통령령으로 정한다")을 물음 | 1차 범위 밖이라 "법률에는 위임만 있고 세부 내용은 시행령에 있음"으로 답하게 규칙화. 시행령 PDF 추가로 확장 |
+| 첫 질의만 느림 | **EKS 실측**: 첫 질의 검색 8.4초(rag-api 임베딩 초기화), 이후 0.16초 → rag-api 시작 시 임베딩 미리 계산(다음 과제) |
 | 법률 자문으로 오인 | 모든 응답 · 화면에 안내 문구. 블로그에도 명시 |
 | 질문에 실제 개인정보 입력 | 주민번호 패턴 마스킹 후에만 로그 · 트레이스 기록. 입력 원문은 저장하지 않음 |
 | 일반 노드 자원 부족 (rag-api 메모리 4Gi + ragdb) | `cpu_node_count = 3`. rag-api는 burst 노드로 보내지 않음(상시 서비스) |
