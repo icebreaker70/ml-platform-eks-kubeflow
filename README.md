@@ -208,8 +208,8 @@ make llm-down                     # ← 끝나면 꼭. GPU 온디맨드 시간�
 
 ```
 parse-pdf → chunk → embed → load-index → eval-retrieval ─┬ Recall@5 ≥ 0.8 ─┬ eval-generation → 인용 정확도 ≥ 0.9 → promote
- (KFP 캐시)  (캐시)   (캐시)  (새 색인 버전)                 │                  └ (NO_GEN=1) ───────────────────→ promote
-                                                            └ 미달: 종료 — 서비스 중 색인은 그대로
+ (KFP 캐시)  (캐시)   (캐시)  (새 색인 버전)                   │                 └ (NO_GEN=1) ───────────────────→ promote
+                                                         └ 미달: 종료 — 서비스 중 색인은 그대로
 ```
 
 - 새 색인은 **적재만 하고 서비스하지 않습니다.** 생성 평가는 rag-api에 `index_version`을 지정해 **승격 전 색인으로** 답하게 해서 잽니다(게이트웨이 경유, 파드 SA 토큰).
