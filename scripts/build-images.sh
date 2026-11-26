@@ -22,7 +22,8 @@ for t in "$@"; do
     ml)      build images/ml/Dockerfile "${IMAGE_ML}" ;;
     builder) build images/builder/Dockerfile "${IMAGE_BUILDER}" ;;
     mlflow)  build images/mlflow/Dockerfile "${IMAGE_MLFLOW}" --build-arg "MLFLOW_VERSION=${MLFLOW_VERSION}" ;;
-    *) die "알 수 없는 대상: $t (ml|builder|mlflow)" ;;
+    rag)     build images/rag/Dockerfile "${IMAGE_RAG}" ;;   # 6주차 (make images-rag)
+    *) die "알 수 없는 대상: $t (ml|builder|mlflow|rag)" ;;
   esac
 done
 log "완료"

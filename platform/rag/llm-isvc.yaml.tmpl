@@ -1,0 +1,125 @@
+# 6주차 LLM 서빙: KServe InferenceService law-llm (vLLM OpenAI 호환 API)
+#
+#  - 배포 모드 Standard(예전 이름 RawDeployment, KServe 0.21 지원 값은 Standard · Knative):
+#    Knative 없이 Deployment + Service로 띄운다. 4주차 idcard-recognizer는 기본값(Knative 서버리스) 그대로.
+#      · 클러스터 내부 전용이라 scale-to-zero · 카나리가 필요 없다
+#      · Knative는 init container를 기본으로 막고, 첫 기동(이미지 10GB + 가중치 9GB)이 progress-deadline을 넘기기 쉽다
+#  - 가중치: init container가 s3://<bucket>/models/<slug>/ → /mnt/models (make llm-cache로 미리 복사)
+#      · KServe storage-initializer 대신 직접 받는다 — Pod Identity 자격 증명 주입을 확실히 하기 위해
+#      · Istio CNI는 앱 init container의 트래픽도 사이드카로 돌리는데, 그때는 사이드카가 아직 없다.
+#        istio-proxy UID(1337)로 실행하면 가로채기에서 빠진다
+#  - 주소: http://law-llm-predictor.<ns>.svc.cluster.local/v1 (rag-api만 허용 — AuthorizationPolicy)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: law-llm
+  namespace: ${KF_PROFILE_NS}   # Pod Identity: S3 models/* 읽기 (infra/terraform/iam.tf)
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: law-llm
+  namespace: ${KF_PROFILE_NS}
+  labels:
+    networking.kserve.io/visibility: cluster-local
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 1
+    serviceAccountName: law-llm
+    nodeSelector:
+      node-role: gpu-serving     # Karpenter NodePool gpu-serving (platform/karpenter/llm-nodepool.yaml.tmpl)
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    initContainers:
+      - name: fetch-model
+        image: ${AWSCLI_IMAGE}
+        command: ["aws", "s3", "sync", "s3://${BUCKET}/models/${LLM_SLUG}/", "/mnt/models/",
+                  "--no-progress", "--only-show-errors", "--exclude", "_COMPLETE.json"]
+        env:
+          - name: AWS_REGION
+            value: ${AWS_REGION}
+          - name: AWS_DEFAULT_REGION
+            value: ${AWS_REGION}
+          - name: HOME
+            value: /tmp
+        securityContext:
+          runAsUser: 1337
+          runAsGroup: 1337
+        resources:
+          requests: { cpu: 500m, memory: 512Mi }
+          limits: { memory: 1Gi }
+        volumeMounts:
+          - name: models
+            mountPath: /mnt/models
+    containers:
+      - name: kserve-container
+        image: ${VLLM_IMAGE}
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+          - --model=/mnt/models
+          - --served-model-name=${LLM_MODEL}
+          - --host=0.0.0.0
+          - --port=8080
+          # RAG 프롬프트는 약 2,000토큰(근거 5개) + 답변 768토큰. 8192면 충분하고 KV 캐시를 덜 쓴다
+          - --max-model-len=8192
+          - --gpu-memory-utilization=0.90
+        env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: VLLM_NO_USAGE_STATS
+            value: "1"
+          - name: DO_NOT_TRACK
+            value: "1"
+        ports:
+          - name: http
+            containerPort: 8080
+            protocol: TCP
+        # 첫 기동: 가중치 로딩 + CUDA 그래프 캡처. 넉넉히 20분까지 기다린다
+        startupProbe:
+          httpGet: { path: /health, port: 8080 }
+          periodSeconds: 10
+          failureThreshold: 120
+        readinessProbe:
+          httpGet: { path: /health, port: 8080 }
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          # g6.xlarge: 4 vCPU · 16GiB (데몬셋 몫을 빼면 약 14GiB 할당 가능)
+          # CPU · 메모리 상한을 반드시 적는다. 비워 두면 KServe가 inferenceservice-config 기본값(cpuLimit 1, memoryLimit 2Gi)을
+          # 채우고, 요청(cpu 2)이 상한(1)보다 커서 Deployment 생성이 거부된다 (EKS 첫 make llm에서 발견)
+          requests: { cpu: "2", memory: 10Gi, nvidia.com/gpu: "1" }
+          limits: { cpu: "4", memory: 13Gi, nvidia.com/gpu: "1" }
+        volumeMounts:
+          - name: models
+            mountPath: /mnt/models
+          - name: dshm
+            mountPath: /dev/shm
+    volumes:
+      - name: models
+        emptyDir:
+          sizeLimit: 30Gi
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+# law-llm은 rag-api만 부른다 (게이트웨이로 노출하지 않음). 4주차의 "모두 허용"보다 좁힌다.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-law-llm
+  namespace: ${KF_PROFILE_NS}
+spec:
+  action: ALLOW
+  selector:
+    matchLabels:
+      serving.kserve.io/inferenceservice: law-llm
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/${KF_PROFILE_NS}/sa/rag-api"]

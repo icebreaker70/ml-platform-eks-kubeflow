@@ -1,0 +1,75 @@
+# 6주차 벡터 저장소: PostgreSQL 17 + pgvector (네임스페이스 rag, Istio 사이드카 없음 — mlflow 네임스페이스와 같은 방식)
+#  - 접속: postgresql://rag:<Secret ragdb>@ragdb.rag.svc.cluster.local:5432/rag
+#  - 스키마는 lawrag.store.init_schema가 만든다 (색인 Job · 파이프라인)
+#  - MLflow DB와 분리: 이미지가 다르고(pgvector 확장), 재색인이 MLflow에 영향을 주지 않게
+apiVersion: v1
+kind: Service
+metadata:
+  name: ragdb
+  namespace: rag
+spec:
+  selector:
+    app: ragdb
+  ports:
+    - name: tcp-postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ragdb
+  namespace: rag
+spec:
+  serviceName: ragdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ragdb
+  template:
+    metadata:
+      labels:
+        app: ragdb
+    spec:
+      nodeSelector:
+        node-role: cpu          # Spot 노드로 가지 않게 (플랫폼 DB는 관리형 일반 노드에만)
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: ${RAGDB_IMAGE}
+          env:
+            - name: POSTGRES_DB
+              value: rag
+            - name: POSTGRES_USER
+              value: rag
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ragdb
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "rag", "-d", "rag"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

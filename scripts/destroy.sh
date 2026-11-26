@@ -16,7 +16,7 @@ if kubectl cluster-info >/dev/null 2>&1; then
 
   log "PVC 사용 워크로드 삭제 (EBS 볼륨 반환)"
   kubectl delete profile --all --timeout=180s 2>/dev/null
-  kubectl delete namespace mlflow buildkit --timeout=300s 2>/dev/null
+  kubectl delete namespace mlflow buildkit rag --timeout=300s 2>/dev/null   # rag: 6주차 ragdb PVC
   kubectl -n kubeflow delete deploy,statefulset --all --timeout=180s 2>/dev/null
   kubectl -n kubeflow delete pvc --all --timeout=180s 2>/dev/null
 

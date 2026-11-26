@@ -1,0 +1,73 @@
+# 색인 Job: S3의 법률 PDF → 파싱 · 청킹 → bge-m3 임베딩(CPU) → ragdb 적재 → 검색 평가 → 기준 통과 시 승격
+#  KFP 색인 파이프라인(PLAN.md 10.6)을 만들기 전까지 쓰는 한 번짜리 Job. 같은 lawrag 코드를 쓴다.
+#  - default-editor SA: S3 datasets/ · models/ 읽기
+#  - 사이드카 없음 (ragdb도 사이드카 없음)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rag-index
+  namespace: ${KF_PROFILE_NS}
+  labels:
+    app: rag-index
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: rag-index
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: default-editor
+      restartPolicy: Never
+      initContainers:
+        - name: fetch-embed-model
+          image: ${AWSCLI_IMAGE}
+          command: ["aws", "s3", "sync", "s3://${BUCKET}/models/${EMBED_SLUG}/", "/models/${EMBED_SLUG}/",
+                    "--no-progress", "--only-show-errors", "--exclude", "_COMPLETE.json"]
+          env:
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+            - name: AWS_DEFAULT_REGION
+              value: ${AWS_REGION}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      containers:
+        - name: index
+          image: ${IMAGE_RAG}
+          imagePullPolicy: Always
+          command: ["python", "-m", "lawrag.index", "load", "--pdf", "${PDF_URI}",
+                    "--suffix", "${INDEX_SUFFIX}", "--gate-recall", "${GATE_RECALL}"]
+          env:
+            - name: RAGDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ragdb
+                  key: password
+            - name: RAGDB_DSN
+              value: postgresql://rag:$(RAGDB_PASSWORD)@ragdb.rag.svc.cluster.local:5432/rag
+            - name: EMBED_MODEL
+              value: /models/${EMBED_SLUG}
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+            - name: AWS_DEFAULT_REGION
+              value: ${AWS_REGION}
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+            limits: { memory: 6Gi }
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      tolerations:                 # 일반 노드에 자리가 없으면 임시 CPU 노드(burst)로
+        - key: workload
+          operator: Equal
+          value: batch
+          effect: NoSchedule
+      volumes:
+        - name: models
+          emptyDir:
+            sizeLimit: 5Gi

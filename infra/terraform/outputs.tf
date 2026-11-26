@@ -60,6 +60,10 @@ output "karpenter_nodepool_settings" {
     gpu_limit            = var.gpu_node_limit
     burst_capacity_types = jsonencode(var.burst_capacity_types)
     burst_cpu_limit      = var.burst_cpu_limit
+    llm_enabled          = var.enable_llm_serving
+    llm_capacity_types   = jsonencode(var.llm_capacity_types)
+    llm_instance_types   = jsonencode(var.llm_instance_types)
+    llm_gpu_limit        = var.llm_gpu_limit
   }
 }
 

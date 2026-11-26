@@ -29,9 +29,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "artifacts" {
 #  - idcard-builder    : MLflow 등록, Bento 빌드, 이미지 빌드, KServe 배포 컴포넌트 이미지
 #  - mlflow-server     : MLflow 서버 이미지 (psycopg2, boto3 포함)
 #  - idcard-recognizer : 파이프라인이 빌드하는 Bento 서빙 이미지
+#  - rag               : 6주차 rag-api · 색인 파이프라인 공용 이미지 (CPU torch, bge-m3)
 # ---------------------------------------------------------------------------
 locals {
-  ecr_repositories = ["idcard-ml", "idcard-builder", "mlflow-server", "idcard-recognizer"]
+  ecr_repositories = ["idcard-ml", "idcard-builder", "mlflow-server", "idcard-recognizer", "rag"]
 }
 
 resource "aws_ecr_repository" "this" {

@@ -121,6 +121,38 @@ variable "burst_cpu_limit" {
 }
 
 # ---------------------------------------------------------------------------
+# 6주차 LLM 서빙 (Karpenter NodePool gpu-serving)
+# ---------------------------------------------------------------------------
+variable "enable_llm_serving" {
+  description = "true면 LLM 서빙 전용 GPU NodePool(gpu-serving)을 만든다. 노드는 LLM 파드(make llm)가 있을 때만 뜬다"
+  type        = bool
+  default     = true
+}
+
+variable "llm_capacity_types" {
+  description = "LLM 서빙 노드 구매 방식. 서빙은 상시 떠 있으므로 Spot 회수로 끊기지 않게 온디맨드가 기본. 비용을 줄이려면 [\"spot\", \"on-demand\"]"
+  type        = list(string)
+  default     = ["on-demand"]
+
+  validation {
+    condition     = length(var.llm_capacity_types) > 0 && alltrue([for t in var.llm_capacity_types : contains(["spot", "on-demand"], t)])
+    error_message = "llm_capacity_types에는 \"spot\", \"on-demand\"만 쓸 수 있습니다."
+  }
+}
+
+variable "llm_instance_types" {
+  description = "LLM 서빙 인스턴스 타입. g6(L4 24GB)는 FP8을 지원해 Qwen3-8B-FP8(가중치 약 9GB)에 KV 캐시 여유가 크다"
+  type        = list(string)
+  default     = ["g6.xlarge"]
+}
+
+variable "llm_gpu_limit" {
+  description = "LLM 서빙 NodePool의 GPU 개수 상한 (학습용 gpu_node_limit과 별도)"
+  type        = number
+  default     = 1
+}
+
+# ---------------------------------------------------------------------------
 # 플랫폼
 # ---------------------------------------------------------------------------
 variable "kubeflow_profile_namespace" {
