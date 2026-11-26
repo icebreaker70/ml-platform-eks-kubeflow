@@ -116,3 +116,23 @@ def test_rag_api_creates_schema_on_startup(monkeypatch):
     monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
     A.startup()
     assert calls == ["fake-conn"]
+
+
+def _qty(v: str) -> float:
+    """쿠버네티스 수량 → 숫자 (cpu: 코어, 메모리: 바이트)."""
+    v = str(v)
+    units = {"m": 1e-3, "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40}
+    for u, f in units.items():
+        if v.endswith(u):
+            return float(v[: -len(u)]) * f
+    return float(v)
+
+
+def test_isvc_containers_set_cpu_and_memory_limits():
+    """KServe는 비어 있는 상한을 기본값(cpu 1, 메모리 2Gi)으로 채운다 → 요청보다 작으면 Deployment가 거부된다."""
+    isvc = next(d for d in _render("llm-isvc.yaml.tmpl") if d["kind"] == "InferenceService")
+    for c in isvc["spec"]["predictor"]["containers"]:
+        req, lim = c["resources"]["requests"], c["resources"]["limits"]
+        for r in ("cpu", "memory"):
+            assert r in lim, f"{c['name']}: limits.{r}가 없으면 KServe 기본값이 들어간다"
+            assert _qty(lim[r]) >= _qty(req[r]), f"{c['name']}: limits.{r} < requests.{r}"

@@ -90,8 +90,10 @@ spec:
           failureThreshold: 3
         resources:
           # g6.xlarge: 4 vCPU · 16GiB (데몬셋 몫을 빼면 약 14GiB 할당 가능)
+          # CPU · 메모리 상한을 반드시 적는다. 비워 두면 KServe가 inferenceservice-config 기본값(cpuLimit 1, memoryLimit 2Gi)을
+          # 채우고, 요청(cpu 2)이 상한(1)보다 커서 Deployment 생성이 거부된다 (EKS 첫 make llm에서 발견)
           requests: { cpu: "2", memory: 10Gi, nvidia.com/gpu: "1" }
-          limits: { memory: 13Gi, nvidia.com/gpu: "1" }
+          limits: { cpu: "4", memory: 13Gi, nvidia.com/gpu: "1" }
         volumeMounts:
           - name: models
             mountPath: /mnt/models
