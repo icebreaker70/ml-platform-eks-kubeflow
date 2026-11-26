@@ -3,7 +3,7 @@
 개인정보 보호법 PDF를 조문 단위로 색인하고, 질문에 **근거 조문을 인용해** 답하는 RAG 서비스를 만드는 실습 저장소입니다.
 LLM은 EKS의 GPU 노드에서 **KServe + vLLM으로 직접 서빙**하고, 색인은 **Kubeflow 파이프라인**이 평가를 통과했을 때만 교체합니다.
 
-- 해설 글: 작성 예정
+- 해설 글: [6주차-EKS에-LLM-RAG-올리기-개인정보-보호법을-근거로-답하는-QA-만들기](https://velog.io/@sejkim/6%EC%A3%BC%EC%B0%A8-EKS%EC%97%90-LLM-RAG-%EC%98%AC%EB%A6%AC%EA%B8%B0-%EA%B0%9C%EC%9D%B8%EC%A0%95%EB%B3%B4-%EB%B3%B4%ED%98%B8%EB%B2%95%EC%9D%84-%EA%B7%BC%EA%B1%B0%EB%A1%9C-%EB%8B%B5%ED%95%98%EB%8A%94-QA-%EB%A7%8C%EB%93%A4%EA%B8%B0)
 - 이전 실습: [5주차 - TensorBoard 인스턴스 + 영화 추천](https://velog.io/@sejkim/5%EC%A3%BC%EC%B0%A8-EKS-Kubeflow%EC%97%90-TensorBoard-%EC%9D%B8%EC%8A%A4%ED%84%B4%EC%8A%A4-%EB%9D%84%EC%9A%B0%EA%B8%B0-%EC%98%81%ED%99%94-%EC%B6%94%EC%B2%9C-%EB%AA%A8%EB%8D%B8%EC%9D%98-%ED%95%99%EC%8A%B5-%EA%B3%BC%EC%A0%95%EC%9D%84-%EB%88%88%EC%9C%BC%EB%A1%9C-%ED%99%95%EC%9D%B8%ED%95%98%EA%B8%B0) ([부록 A](#부록-a-5주차-tensorboard--영화-추천)) ·
   [4주차 - 신분증 인식 MLOps 파이프라인](https://velog.io/@sejkim/4%EC%A3%BC%EC%B0%A8-EKS-%EC%9C%84%EC%97%90-Kubeflow-MLflow-BentoML-KServe%EB%A1%9C-%EC%8B%A0%EB%B6%84%EC%A6%9D-%EC%9D%B8%EC%8B%9D-MLOps-%ED%8C%8C%EC%9D%B4%ED%94%84%EB%9D%BC%EC%9D%B8-%EB%A7%8C%EB%93%A4%EA%B8%B0) ([부록 B](#부록-b-4주차-신분증-인식-파이프라인)) — 같은 저장소에 들어 있습니다
 - 시리즈: [Machine Learning Platform Engineering](https://velog.io/@sejkim/series/Machine-Learning-Platform-Engineering)
