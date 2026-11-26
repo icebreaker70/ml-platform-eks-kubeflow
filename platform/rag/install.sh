@@ -118,10 +118,20 @@ cmd_llm() {
   log "law-llm: ${LLM_MODEL} on ${VLLM_IMAGE} (GPU 노드 gpu-serving 기동 → 이미지 · 가중치 받기 → 로딩, 10분 안팎)"
   render llm-isvc.yaml.tmpl KF_PROFILE_NS BUCKET AWS_REGION AWSCLI_IMAGE VLLM_IMAGE LLM_MODEL LLM_SLUG \
     | kubectl apply -f -
-  local t0=$SECONDS
-  kubectl -n "${KF_PROFILE_NS}" wait --for=condition=Ready isvc/law-llm --timeout=1800s \
-    || { kubectl -n "${KF_PROFILE_NS}" get pods -l serving.kserve.io/inferenceservice=law-llm -o wide;
-         die "law-llm이 Ready가 되지 않았습니다 — kubectl describe pod / logs -c kserve-container 확인"; }
+  local t0=$SECONDS ns="${KF_PROFILE_NS}"
+  fail() { kubectl -n "${ns}" get isvc law-llm -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}';
+           kubectl -n "${ns}" get pods -l serving.kserve.io/inferenceservice=law-llm -o wide;
+           die "law-llm이 Ready가 되지 않았습니다 — $1"; }
+  # 1) KServe가 Deployment를 만들 때까지 (리소스 설정이 잘못되면 여기서 isvc 조건에 사유가 남는다)
+  for _ in $(seq 1 60); do kubectl -n "${ns}" get deploy law-llm-predictor >/dev/null 2>&1 && break; sleep 5; done
+  kubectl -n "${ns}" get deploy law-llm-predictor >/dev/null 2>&1 || fail "Deployment가 만들어지지 않음 (isvc 조건 확인)"
+  # 2) 롤아웃 완료 — Deployment의 generation을 따라가므로 다시 적용해도 정확하다
+  kubectl -n "${ns}" rollout status deploy/law-llm-predictor --timeout=1800s \
+    || fail "kubectl describe pod / logs -c kserve-container 확인"
+  # 3) isvc Ready. --for=condition은 쓰지 않는다: 다시 적용하면 KServe(Standard)가 status.observedGeneration을
+  #    갱신하지 않아(generation 2, observedGeneration 1) kubectl wait가 Ready=True를 오래된 조건으로 무시한다 (EKS 실측)
+  kubectl -n "${ns}" wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True isvc/law-llm --timeout=300s \
+    || fail "isvc 조건 확인"
   log "law-llm Ready ($(( SECONDS - t0 ))초). 실습이 끝나면 make llm-down (GPU 온디맨드 과금)"
 }
 
