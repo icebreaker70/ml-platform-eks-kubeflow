@@ -98,3 +98,21 @@ def test_cache_split_s3_and_local_pdf():
     with pytest.raises(ValueError):
         split_s3("/local/path")
     assert fetch_pdf("docs/a.pdf") == "docs/a.pdf"
+
+
+def test_rag_api_creates_schema_on_startup(monkeypatch):
+    """새 ragdb(테이블 없음)에서도 healthz가 500이 나지 않도록 rag-api 시작 시 스키마를 만든다."""
+    pytest.importorskip("fastapi")
+    import sys
+
+    sys.path.insert(0, os.path.join(ROOT, "ml"))
+    import rag_api.app as A
+
+    calls = []
+    monkeypatch.setattr(A.store, "init_schema", lambda conn: calls.append(conn))
+    monkeypatch.setattr(A.State, "conn", lambda self: "fake-conn")
+    monkeypatch.setattr(A, "Embedder", lambda: type("E", (), {"name": "fake"})())
+    monkeypatch.setattr(A, "LLM", lambda: type("L", (), {"model": "fake"})())
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    A.startup()
+    assert calls == ["fake-conn"]

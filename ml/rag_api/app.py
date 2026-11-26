@@ -63,6 +63,9 @@ app = FastAPI(title="law-rag", docs_url="/rag/docs", openapi_url="/rag/openapi.j
 
 @app.on_event("startup")
 def startup() -> None:
+    # 새 ragdb에는 테이블이 없다(스키마는 색인 적재 때 만들어졌음). healthz가 active_index를 조회하므로
+    # 먼저 만들어 둔다 — CREATE … IF NOT EXISTS라 여러 번 실행해도 안전 (EKS 첫 배포에서 readiness 500으로 발견)
+    store.init_schema(state.conn())
     state.embedder = Embedder()
     state.llm = LLM()
     if os.environ.get("MLFLOW_TRACKING_URI"):
