@@ -70,7 +70,8 @@ rag-api-local: ## rag-api 로컬 실행 → http://127.0.0.1:18000/rag/ (make ra
 
 # ---------------------------------------------------------------- AWS ----
 infra: ## Terraform: VPC, EKS(1.36), 노드그룹, S3, ECR, IAM, ALB 컨트롤러, NVIDIA 플러그인
-	$(TF) init -upgrade
+	@# -upgrade를 쓰지 않는다: provider 버전은 커밋한 .terraform.lock.hcl로 고정 (올릴 때만 직접 terraform init -upgrade)
+	$(TF) init
 	$(TF) apply
 	$(MAKE) kubeconfig
 	bash platform/karpenter/apply.sh
